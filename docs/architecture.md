@@ -2,33 +2,47 @@
 
 ## Current implementation
 
-MiniKV currently owns an in-memory hash table and exposes the first useful
-storage semantics through a small C++ API.
+MiniKV now records mutations in a versioned append-only file and keeps live
+values in an in-memory hash table.
 
 ```text
-Client
-  -> minikv::MiniKV
-  -> std::unordered_map<std::string, std::string>
-  -> process memory
+Client PUT/DELETE
+  -> minikv::MiniKV logical operation
+  -> Record encoder
+  -> StorageLog append + stream flush
+  -> disk file
+  -> in-memory std::unordered_map update
+
+Client GET/CONTAINS
+  -> in-memory std::unordered_map
 ```
 
-Each `MiniKV` object owns its map, so separate instances do not share state. The
-map owns copies of keys and values. `std::string` is used as a length-aware byte
-container, which permits empty data and embedded NUL bytes.
+The three responsibilities are deliberately separate. `MiniKV` defines logical
+behavior, the record codec defines bytes, and `StorageLog` owns file I/O and the
+next append offset. See [the file-format specification](file-format.md) for the
+stable version 1 layout.
+
+Each `MiniKV` is constructed with a log path. Opening creates the file if needed
+and discovers its current size so new records append after existing bytes. It
+does not read those bytes or reconstruct the map yet.
 
 ## API semantics
 
 | Storage operation | C++ method | Behavior |
 | --- | --- | --- |
-| PUT | `put(key, value)` | Inserts a new key or overwrites its current value. |
+| PUT | `put(key, value)` | Appends a PUT, then inserts or overwrites in memory. |
 | GET | `get(key)` | Returns a copied value in `std::optional`, or `std::nullopt` when missing. |
-| DELETE | `erase(key)` | Removes a key and reports whether it existed. |
+| DELETE | `erase(key)` | If present, appends a tombstone, removes the key, and returns true. Missing keys return false without an append. |
 | CONTAINS | `contains(key)` | Reports whether a key currently exists. |
 
 Empty keys and values are valid. A present empty value is distinguishable from a
 missing key because only the latter returns `std::nullopt`. Keys and values may
 contain arbitrary bytes, including NUL. This stage provides no synchronization;
 concurrent access to the same instance is not supported.
+
+If record encoding or append/flush fails, the exception reaches the caller and
+the in-memory map is not changed. A partial failed write may still leave a torn
+tail on disk; detecting and handling that condition is a later stage.
 
 The hash table gives expected average constant-time lookup, insertion, and
 deletion. A pathological collision pattern can degrade an operation to linear
@@ -47,15 +61,17 @@ Client
   -> disk
 ```
 
-The API now defines observable behavior, and the in-memory map makes reads fast.
-There is still no record format, file I/O, or durability claim. Stage 2 will add
-an append-only log as the durable source of truth and rebuild the index from that
-log after restart.
+The API defines observable behavior, the map makes reads fast, and the log keeps
+mutation bytes across normal process exit. The log is not yet a usable source of
+truth after restart because startup replay is absent. Stream flush is also not a
+power-loss durability guarantee; explicit OS sync policy comes later.
 
 ## Boundaries
 
 - `include/minikv`: public library interface
-- `src`: private engine implementation
+- `src/record.*`: private binary record model and codec
+- `src/storage_log.*`: private append-only disk I/O
+- `src/minikv.cpp`: logical operation ordering and in-memory state
 - `tools`: small programs that use the public interface
 - `tests`: deterministic local checks
 - `benchmarks`: deferred performance workloads

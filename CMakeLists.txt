@@ -15,7 +15,13 @@ function(minikv_enable_warnings target_name)
     endif()
 endfunction()
 
-add_library(minikv src/minikv.cpp src/version.cpp)
+add_library(
+    minikv
+    src/minikv.cpp
+    src/record.cpp
+    src/storage_log.cpp
+    src/version.cpp
+)
 add_library(MiniKV::minikv ALIAS minikv)
 
 target_compile_features(minikv PUBLIC cxx_std_20)
@@ -35,10 +41,26 @@ minikv_enable_warnings(minikv_demo)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(minikv_tests tests/minikv_test.cpp)
-    target_link_libraries(minikv_tests PRIVATE MiniKV::minikv)
-    set_target_properties(minikv_tests PROPERTIES CXX_EXTENSIONS OFF)
-    minikv_enable_warnings(minikv_tests)
+    function(minikv_add_test target_name source_file test_name)
+        add_executable(${target_name} ${source_file})
+        target_link_libraries(${target_name} PRIVATE MiniKV::minikv)
+        target_include_directories(
+            ${target_name}
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        )
+        set_target_properties(${target_name} PROPERTIES CXX_EXTENSIONS OFF)
+        minikv_enable_warnings(${target_name})
 
-    add_test(NAME minikv.in_memory COMMAND minikv_tests)
+        add_test(NAME ${test_name} COMMAND ${target_name})
+    endfunction()
+
+    minikv_add_test(minikv_tests tests/minikv_test.cpp minikv.api)
+    minikv_add_test(record_tests tests/record_test.cpp minikv.record)
+    minikv_add_test(
+        storage_log_tests
+        tests/storage_log_test.cpp
+        minikv.storage_log
+    )
 endif()

@@ -1,41 +1,22 @@
 #include "minikv/minikv.hpp"
 #include "minikv/version.hpp"
 
-#include <cstddef>
-#include <iostream>
+#include "record.hpp"
+#include "test_support.hpp"
+
+#include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
-#include <string_view>
 
 namespace {
 
-class TestRunner {
-public:
-    void expect(bool condition, std::string_view description) {
-        ++checks_;
-        if (!condition) {
-            ++failures_;
-            std::cerr << "FAIL: " << description << '\n';
-        }
-    }
+using minikv::test::TestRunner;
+using minikv::test::TemporaryDirectory;
 
-    [[nodiscard]] int finish() const {
-        if (failures_ == 0) {
-            std::cout << "All " << checks_ << " checks passed\n";
-            return 0;
-        }
-
-        std::cerr << failures_ << " of " << checks_ << " checks failed\n";
-        return 1;
-    }
-
-private:
-    std::size_t checks_{0};
-    std::size_t failures_{0};
-};
-
-void test_insert_read_and_overwrite(TestRunner& tests) {
-    minikv::MiniKV store;
+void test_insert_read_and_overwrite(TestRunner& tests,
+                                    const std::filesystem::path& log_path) {
+    minikv::MiniKV store(log_path);
 
     tests.expect(store.empty(), "a new store is empty");
     tests.expect(store.size() == 0, "a new store has size zero");
@@ -55,14 +36,18 @@ void test_insert_read_and_overwrite(TestRunner& tests) {
         "overwrite replaces the previous value");
 }
 
-void test_missing_and_delete(TestRunner& tests) {
-    minikv::MiniKV store;
+void test_missing_and_delete(TestRunner& tests,
+                             const std::filesystem::path& log_path) {
+    minikv::MiniKV store(log_path);
 
     tests.expect(!store.contains("missing"), "contains rejects a missing key");
     tests.expect(!store.get("missing").has_value(),
                  "get returns nullopt for a missing key");
+    const auto initial_log_size = std::filesystem::file_size(log_path);
     tests.expect(!store.erase("missing"),
                  "erase returns false for a missing key");
+    tests.expect(std::filesystem::file_size(log_path) == initial_log_size,
+                 "erasing a missing key does not append a record");
 
     store.put("temporary", "value");
     tests.expect(store.erase("temporary"),
@@ -76,8 +61,9 @@ void test_missing_and_delete(TestRunner& tests) {
                  "erasing the same key twice returns false");
 }
 
-void test_empty_and_binary_data(TestRunner& tests) {
-    minikv::MiniKV store;
+void test_empty_and_binary_data(TestRunner& tests,
+                                const std::filesystem::path& log_path) {
+    minikv::MiniKV store(log_path);
 
     store.put("", "empty key");
     tests.expect(
@@ -101,9 +87,10 @@ void test_empty_and_binary_data(TestRunner& tests) {
                  "values preserve embedded NUL bytes");
 }
 
-void test_independent_instances(TestRunner& tests) {
-    minikv::MiniKV first;
-    minikv::MiniKV second;
+void test_independent_instances(TestRunner& tests,
+                                const std::filesystem::path& directory) {
+    minikv::MiniKV first(directory / "first.minikv");
+    minikv::MiniKV second(directory / "second.minikv");
 
     first.put("shared name", "first value");
     second.put("shared name", "second value");
@@ -121,17 +108,81 @@ void test_independent_instances(TestRunner& tests) {
                  "erasing from one instance does not affect another");
 }
 
+void test_mutations_are_appended(TestRunner& tests,
+                                 const std::filesystem::path& log_path) {
+    {
+        minikv::MiniKV store(log_path);
+        store.put("name", "Vijay");
+        store.put("name", "MiniKV");
+        tests.expect(store.erase("name"),
+                     "delete succeeds after persistent puts");
+    }
+
+    const auto bytes = minikv::test::read_file(log_path);
+    const std::span<const char> input(bytes.data(), bytes.size());
+    std::size_t offset = 0;
+
+    const auto first = minikv::detail::decode_record(input.subspan(offset));
+    offset += first.bytes_consumed;
+    tests.expect(first.record == minikv::detail::Record{
+                                     minikv::detail::Operation::Put,
+                                     "name",
+                                     "Vijay"},
+                 "first put is encoded in the log");
+
+    const auto second = minikv::detail::decode_record(input.subspan(offset));
+    offset += second.bytes_consumed;
+    tests.expect(second.record == minikv::detail::Record{
+                                      minikv::detail::Operation::Put,
+                                      "name",
+                                      "MiniKV"},
+                 "overwrite appends another put record");
+
+    const auto third = minikv::detail::decode_record(input.subspan(offset));
+    offset += third.bytes_consumed;
+    tests.expect(third.record == minikv::detail::Record{
+                                     minikv::detail::Operation::Delete,
+                                     "name",
+                                     {}},
+                 "delete appends a tombstone record");
+    tests.expect(offset == bytes.size(),
+                 "the integration log contains exactly three records");
+}
+
+void test_rejected_put_does_not_change_state(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    minikv::MiniKV store(log_path);
+    const std::string oversized_key(minikv::detail::maximum_key_size + 1, 'k');
+
+    tests.expect_throws<minikv::detail::RecordError>(
+        [&] { store.put(oversized_key, "value"); },
+        "put reports an encoding failure");
+    tests.expect(store.empty(),
+                 "a rejected put does not update the in-memory map");
+    tests.expect(std::filesystem::file_size(log_path) == 0,
+                 "a rejected put does not append log bytes");
+}
+
 }  // namespace
 
 int main() {
     TestRunner tests;
+    TemporaryDirectory temporary_directory;
 
     tests.expect(minikv::version() == "0.1.0-dev",
                  "the library exposes its version");
-    test_insert_read_and_overwrite(tests);
-    test_missing_and_delete(tests);
-    test_empty_and_binary_data(tests);
-    test_independent_instances(tests);
+    test_insert_read_and_overwrite(
+        tests, temporary_directory.path() / "insert.minikv");
+    test_missing_and_delete(
+        tests, temporary_directory.path() / "delete.minikv");
+    test_empty_and_binary_data(
+        tests, temporary_directory.path() / "binary.minikv");
+    test_independent_instances(tests, temporary_directory.path());
+    test_mutations_are_appended(
+        tests, temporary_directory.path() / "mutations.minikv");
+    test_rejected_put_does_not_change_state(
+        tests, temporary_directory.path() / "rejected.minikv");
 
     return tests.finish();
 }

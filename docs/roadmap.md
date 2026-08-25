@@ -20,31 +20,38 @@ by the next one.
 - Keep this stage deliberately nonpersistent so process restart demonstrates the
   exact data-loss problem the append-only log must solve.
 
-## Stage 2 — append-only persistence
+## Stage 2 — binary records and append-only persistence (complete)
 
 - Introduce a documented binary record format.
-- Append mutations to one storage log.
-- Rebuild the in-memory index by replaying records at startup.
-- Represent deletion with tombstones.
+- Append PUT and DELETE mutations to one storage log before changing memory.
+- Represent deletion with a tombstone and return record byte offsets from appends.
+- Validate versions, operations, limits, malformed headers, and truncated input.
+- Deliberately do not rebuild the in-memory index at startup yet.
 
-## Stage 3 — corruption boundaries and durability
+## Stage 3 — restart recovery
+
+- Scan and decode records from the start of the log.
+- Replay PUTs and tombstones to rebuild the in-memory state.
+- Define explicit startup behavior for malformed input.
+
+## Stage 4 — corruption boundaries and durability
 
 - Add checksums and record validation.
 - Detect and ignore an incomplete tail record after a torn write.
 - Define flush/sync behavior and make durability guarantees explicit.
 
-## Stage 4 — multithreaded access
+## Stage 5 — multithreaded access
 
 - Protect engine state with straightforward standard-library synchronization.
 - Test parallel readers and writers before considering finer-grained locking.
 
-## Stage 5 — segments and compaction
+## Stage 6 — segments and compaction
 
 - Rotate bounded segment files.
 - Rewrite only live records during compaction.
 - Make replacement crash-safe and recovery-aware.
 
-## Stage 6 — measurement and automation
+## Stage 7 — measurement and automation
 
 - Add representative read/write benchmarks.
 - Profile before optimizing.
