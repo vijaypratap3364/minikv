@@ -2,20 +2,38 @@
 
 ## Current implementation
 
-The bootstrap milestone contains one small C++20 library target. Its only public
-function reports version metadata. Both the demo executable and the smoke-test
-executable link against that library, proving the intended target boundary works.
+MiniKV currently owns an in-memory hash table and exposes the first useful
+storage semantics through a small C++ API.
 
 ```text
-minikv_demo ----\
-                 -> MiniKV::minikv -> version metadata
-minikv_tests ---/
+Client
+  -> minikv::MiniKV
+  -> std::unordered_map<std::string, std::string>
+  -> process memory
 ```
 
-There is currently no key-value API, in-memory index, record format, file I/O, or
-durability claim. That absence is intentional: this milestone establishes a
-repeatable build and test baseline before storage behavior makes failures more
-interesting.
+Each `MiniKV` object owns its map, so separate instances do not share state. The
+map owns copies of keys and values. `std::string` is used as a length-aware byte
+container, which permits empty data and embedded NUL bytes.
+
+## API semantics
+
+| Storage operation | C++ method | Behavior |
+| --- | --- | --- |
+| PUT | `put(key, value)` | Inserts a new key or overwrites its current value. |
+| GET | `get(key)` | Returns a copied value in `std::optional`, or `std::nullopt` when missing. |
+| DELETE | `erase(key)` | Removes a key and reports whether it existed. |
+| CONTAINS | `contains(key)` | Reports whether a key currently exists. |
+
+Empty keys and values are valid. A present empty value is distinguishable from a
+missing key because only the latter returns `std::nullopt`. Keys and values may
+contain arbitrary bytes, including NUL. This stage provides no synchronization;
+concurrent access to the same instance is not supported.
+
+The hash table gives expected average constant-time lookup, insertion, and
+deletion. A pathological collision pattern can degrade an operation to linear
+time. Hashing still examines the key bytes, and `put`/`get` copy or move owned
+data, so byte lengths also affect real cost.
 
 ## Intended storage architecture
 
@@ -29,11 +47,10 @@ Client
   -> disk
 ```
 
-The API will define observable behavior. The in-memory index will make reads
-fast. The append-only log will become the durable source of truth. Recovery will
-replay that log to reconstruct the index after restart. Later stages will add
-defenses and lifecycle mechanisms only after tests demonstrate why they are
-needed.
+The API now defines observable behavior, and the in-memory map makes reads fast.
+There is still no record format, file I/O, or durability claim. Stage 2 will add
+an append-only log as the durable source of truth and rebuild the index from that
+log after restart.
 
 ## Boundaries
 

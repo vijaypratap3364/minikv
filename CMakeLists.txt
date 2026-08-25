@@ -15,7 +15,7 @@ function(minikv_enable_warnings target_name)
     endif()
 endfunction()
 
-add_library(minikv src/version.cpp)
+add_library(minikv src/minikv.cpp src/version.cpp)
 add_library(MiniKV::minikv ALIAS minikv)
 
 target_compile_features(minikv PUBLIC cxx_std_20)
@@ -35,10 +35,10 @@ minikv_enable_warnings(minikv_demo)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(minikv_tests tests/version_test.cpp)
+    add_executable(minikv_tests tests/minikv_test.cpp)
     target_link_libraries(minikv_tests PRIVATE MiniKV::minikv)
     set_target_properties(minikv_tests PROPERTIES CXX_EXTENSIONS OFF)
     minikv_enable_warnings(minikv_tests)
 
-    add_test(NAME minikv.version COMMAND minikv_tests)
+    add_test(NAME minikv.in_memory COMMAND minikv_tests)
 endif()

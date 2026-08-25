@@ -4,7 +4,7 @@
 
 namespace minikv {
 
-// Returns build metadata only. Storage operations begin in Stage 1.
+// Returns build metadata for diagnostics.
 [[nodiscard]] std::string_view version() noexcept;
 
 }  // namespace minikv

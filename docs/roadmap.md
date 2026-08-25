@@ -10,12 +10,13 @@ by the next one.
 - dependency-free CTest smoke test
 - warnings, documentation, and repository rules
 
-## Stage 1 — API semantics and volatile index
+## Stage 1 — API semantics and volatile index (complete)
 
 - Define `PUT`, `GET`, and `DELETE` behavior through a small public API.
 - Implement the behavior with an in-memory standard-library map.
 - Test insertion, lookup, overwrite, deletion, missing keys, empty values, and
   multiple independent engine instances.
+- Allow empty and binary-safe keys and values with explicit missing-key behavior.
 - Keep this stage deliberately nonpersistent so process restart demonstrates the
   exact data-loss problem the append-only log must solve.
 
