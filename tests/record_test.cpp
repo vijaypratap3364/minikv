@@ -61,19 +61,12 @@ void test_round_trip(TestRunner& tests) {
                  "put record survives an encode/decode round trip");
     tests.expect(decoded_put.bytes_consumed == encoded_put.size(),
                  "put decoder reports the full record size");
-
-    const Record deletion{Operation::Delete, "obsolete", {}};
-    const auto encoded_delete = minikv::detail::encode_record(deletion);
-    const auto decoded_delete =
-        minikv::detail::decode_record(as_span(encoded_delete));
-    tests.expect(decoded_delete.record == deletion,
-                 "delete record survives an encode/decode round trip");
 }
 
 void test_multiple_records(TestRunner& tests) {
     const Record first{Operation::Put, "first", "one"};
     const Record second{Operation::Put, "second", "two"};
-    const Record third{Operation::Delete, "first", {}};
+    const Record third{Operation::Put, "third", "three"};
 
     EncodedRecord combined;
     for (const auto& record : {first, second, third}) {
@@ -179,23 +172,6 @@ void test_malformed_records(TestRunner& tests) {
                 minikv::detail::decode_record(as_span(oversized_value)));
         },
         "decoder rejects an oversized encoded value length");
-
-    auto delete_with_value = valid;
-    delete_with_value[operation_offset] =
-        std::bit_cast<char>(static_cast<std::uint8_t>(Operation::Delete));
-    tests.expect_throws<RecordError>(
-        [&] {
-            static_cast<void>(
-                minikv::detail::decode_record(as_span(delete_with_value)));
-        },
-        "decoder rejects a delete record with a value");
-
-    tests.expect_throws<RecordError>(
-        [] {
-            static_cast<void>(minikv::detail::encode_record(
-                Record{Operation::Delete, "key", "value"}));
-        },
-        "encoder rejects a delete record with a value");
 }
 
 void test_truncated_input(TestRunner& tests) {
@@ -234,6 +210,15 @@ void test_invalid_version_and_operation(TestRunner& tests) {
                 minikv::detail::decode_record(as_span(invalid_operation)));
         },
         "decoder rejects an unknown operation");
+
+    auto premature_delete = valid;
+    premature_delete[operation_offset] = '\2';
+    tests.expect_throws<RecordError>(
+        [&] {
+            static_cast<void>(
+                minikv::detail::decode_record(as_span(premature_delete)));
+        },
+        "decoder rejects the deferred DELETE operation");
 
     tests.expect_throws<RecordError>(
         [] {

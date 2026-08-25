@@ -47,11 +47,6 @@ void validate_record(const Record& record) {
     switch (record.operation) {
         case Operation::Put:
             break;
-        case Operation::Delete:
-            if (!record.value.empty()) {
-                throw RecordError("delete records cannot contain a value");
-            }
-            break;
         default:
             throw RecordError("record has an invalid operation");
     }
@@ -68,8 +63,6 @@ void validate_record(const Record& record) {
     switch (encoded_operation) {
         case static_cast<std::uint8_t>(Operation::Put):
             return Operation::Put;
-        case static_cast<std::uint8_t>(Operation::Delete):
-            return Operation::Delete;
         default:
             throw RecordError("record has an unknown operation");
     }
@@ -129,10 +122,6 @@ DecodedRecord decode_record(std::span<const char> input) {
     if (value_length > maximum_value_size) {
         throw RecordError("encoded value length exceeds the maximum size");
     }
-    if (operation == Operation::Delete && value_length != 0) {
-        throw RecordError("delete record has a nonzero value length");
-    }
-
     const auto payload_size = static_cast<std::size_t>(key_length) +
                               static_cast<std::size_t>(value_length);
     const auto encoded_size = record_header_size + payload_size;

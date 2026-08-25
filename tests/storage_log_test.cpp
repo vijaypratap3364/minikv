@@ -24,7 +24,7 @@ void test_append_and_offsets(TestRunner& tests,
     const std::vector<Record> expected{
         {Operation::Put, "first", "one"},
         {Operation::Put, "second", "two"},
-        {Operation::Delete, "first", {}},
+        {Operation::Put, "third", "three"},
     };
     std::vector<AppendResult> locations;
 

@@ -2,18 +2,18 @@
 
 ## Current implementation
 
-MiniKV now records mutations in a versioned append-only file and keeps live
-values in an in-memory hash table.
+MiniKV now records PUTs in a versioned append-only file and keeps live values in
+an in-memory hash table. DELETE remains an in-memory operation during Stage 2.
 
 ```text
-Client PUT/DELETE
+Client PUT
   -> minikv::MiniKV logical operation
   -> Record encoder
   -> StorageLog append + stream flush
   -> disk file
   -> in-memory std::unordered_map update
 
-Client GET/CONTAINS
+Client GET/CONTAINS/DELETE
   -> in-memory std::unordered_map
 ```
 
@@ -32,7 +32,7 @@ does not read those bytes or reconstruct the map yet.
 | --- | --- | --- |
 | PUT | `put(key, value)` | Appends a PUT, then inserts or overwrites in memory. |
 | GET | `get(key)` | Returns a copied value in `std::optional`, or `std::nullopt` when missing. |
-| DELETE | `erase(key)` | If present, appends a tombstone, removes the key, and returns true. Missing keys return false without an append. |
+| DELETE | `erase(key)` | Removes an in-memory key and reports whether it existed. It does not append during Stage 2. |
 | CONTAINS | `contains(key)` | Reports whether a key currently exists. |
 
 Empty keys and values are valid. A present empty value is distinguishable from a
@@ -40,9 +40,9 @@ missing key because only the latter returns `std::nullopt`. Keys and values may
 contain arbitrary bytes, including NUL. This stage provides no synchronization;
 concurrent access to the same instance is not supported.
 
-If record encoding or append/flush fails, the exception reaches the caller and
-the in-memory map is not changed. A partial failed write may still leave a torn
-tail on disk; detecting and handling that condition is a later stage.
+If PUT record encoding or append/flush fails, the exception reaches the caller
+and the in-memory map is not changed. A partial failed write may still leave a
+torn tail on disk; detecting and handling that condition is a later stage.
 
 The hash table gives expected average constant-time lookup, insertion, and
 deletion. A pathological collision pattern can degrade an operation to linear
@@ -57,14 +57,15 @@ The engine will grow toward this data flow:
 Client
   -> MiniKV API (PUT, GET, DELETE)
   -> in-memory index (key to latest record location)
-  -> append-only storage log (binary records and tombstones)
+  -> append-only storage log (PUT records now, tombstones in Stage 4)
   -> disk
 ```
 
 The API defines observable behavior, the map makes reads fast, and the log keeps
-mutation bytes across normal process exit. The log is not yet a usable source of
-truth after restart because startup replay is absent. Stream flush is also not a
-power-loss durability guarantee; explicit OS sync policy comes later.
+PUT bytes across normal process exit. DELETE is not persistent yet. The log is
+not yet a usable source of truth after restart because startup replay is absent.
+Stream flush is also not a power-loss durability guarantee; explicit OS sync
+policy comes later.
 
 ## Boundaries
 

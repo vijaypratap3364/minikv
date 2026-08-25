@@ -78,26 +78,25 @@ concurrent unsynchronized access yet, and memory usage grows with the live data.
 
 ### 6. What new problem does this design introduce?
 
-Stage 2 must preserve mutations across process restarts without losing the fast
-in-memory lookup path. The next design will need an append-only binary log,
-tombstones for deletion, and startup replay that reconstructs the same map. It
-should first establish basic persistence; stronger torn-write and durability
-guarantees remain later problems.
+Stage 2 must first preserve PUT bytes without losing the fast in-memory lookup
+path. Restart replay is the next problem. Once replay exists, deletion will need
+its own persistent representation; Stage 4 will add tombstones. Stronger
+torn-write and durability guarantees also remain later problems.
 
 ## Append-only persistence: turning operations into bytes
 
 ### 1. What problem existed?
 
 The hash table held useful state but only in RAM. When its process ended, there
-was no lasting description of which puts and deletes had occurred. We needed to
-turn each mutation into bytes that could remain in a file.
+was no lasting description of which puts had occurred. We needed to turn PUT
+operations into bytes that could remain in a file.
 
 ### 2. What did we build?
 
 We built a versioned binary record codec and an append-only storage log. This
 conversion from logical fields such as operation, key, and value into a defined
-byte sequence is called serialization. PUT records carry key and value bytes;
-DELETE records are tombstones that carry a key and an empty value.
+byte sequence is called serialization. During Stage 2, the only valid encoded
+operation is PUT. DELETE still changes only the current in-memory map.
 
 We cannot safely dump a C++ `Record` object directly to disk. Its strings contain
 pointers to separately allocated memory, object padding is compiler-dependent,
@@ -107,7 +106,7 @@ fields with fixed widths, byte order, limits, and version rules.
 
 ### 3. How does it solve the problem?
 
-Every successful mutation is appended to the end of the log before RAM changes.
+Every successful PUT is appended to the end of the log before RAM changes.
 Append-only writing is simple because old bytes never move: the next record goes
 at the current end. Its offset is the zero-based byte position where that record
 starts, so later code can locate it without scanning unrelated bytes.
@@ -123,9 +122,10 @@ history.
 The encoder validates the operation and size limits, writes a 16-byte header in
 the documented format, and then copies the exact key and value bytes. The
 storage log writes that encoded record in binary append mode and flushes the C++
-stream. Only after append succeeds does `MiniKV` insert, overwrite, or erase the
-in-memory entry. The decoder reverses the format explicitly and reports how many
-bytes it consumed so another record can follow immediately.
+stream. Only after append succeeds does `MiniKV` insert or overwrite the
+in-memory entry. DELETE bypasses the log and erases only the current map. The
+decoder reverses the format explicitly and reports how many bytes it consumed so
+another record can follow immediately.
 
 ### 5. What can still go wrong?
 
@@ -135,14 +135,16 @@ and version 1 has no checksum to detect arbitrary corruption. Concurrent access
 is still unsupported. Memory allocation could also fail after a successful log
 append but before the in-memory update finishes.
 
-Most importantly, MiniKV does not read the file at startup. The mutation history
-survives a normal exit, but a new instance starts with an empty hash table. Merely
-writing records is insufficient for recovery because something must parse them
-in order, apply PUTs and tombstones, and decide what to do with invalid input.
+Most importantly, MiniKV does not read the file at startup. PUT records survive
+a normal exit, but a new instance starts with an empty hash table. Merely writing
+records is insufficient for recovery because something must parse and apply PUTs
+in order and decide what to do with invalid input. DELETE is not persistent at
+all yet.
 
 ### 6. What new problem does this design introduce?
 
-The next stage must replay the log to reconstruct the same live state after a
-restart. That recovery path must use record offsets and the decoder without
-silently accepting malformed data. Checksums, torn-write policy, and explicit
-power-loss durability remain separate follow-on problems.
+Stage 3 must replay PUT records to reconstruct values after a restart. Once that
+works, an in-memory DELETE would otherwise be forgotten and an older PUT could
+reappear. Stage 4 will solve that new problem by recording deletion as a
+tombstone. Checksums, torn-write policy, and explicit power-loss durability also
+remain follow-on problems.

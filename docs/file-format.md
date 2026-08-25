@@ -10,7 +10,7 @@ its own magic and version so a decoder validates the boundary it was given.
 | ---: | ---: | --- | --- |
 | 0 | 4 bytes | Magic | ASCII bytes `MKVR` |
 | 4 | 1 byte | Format version | `0x01` |
-| 5 | 1 byte | Operation | `0x01` PUT, `0x02` DELETE |
+| 5 | 1 byte | Operation | `0x01` PUT; all other values are invalid in Stage 2 |
 | 6 | 2 bytes | Reserved | Both bytes must be zero |
 | 8 | 4 bytes | Key length | Unsigned 32-bit little-endian byte count |
 | 12 | 4 bytes | Value length | Unsigned 32-bit little-endian byte count |
@@ -21,9 +21,9 @@ All multibyte integers use little-endian byte order: the least significant byte
 appears first. Magic, version, and operation fields do not have an endianness.
 The fixed header is 16 bytes.
 
-DELETE is a tombstone. Its key identifies the value to remove, and its value
-length must be zero. Empty keys are valid for both operations. Empty PUT values
-are valid and are distinct from DELETE.
+The operation byte is retained as a structural part of the format, but version 1
+Stage 2 recognizes only PUT. Persistent DELETE and its tombstone encoding are
+deferred until Stage 4. Empty PUT keys and values are valid.
 
 ## Limits
 
@@ -50,8 +50,7 @@ Before constructing key or value strings, the decoder:
 2. Verifies magic, version, operation, and zero reserved bytes.
 3. Decodes both lengths explicitly from little-endian bytes.
 4. Rejects lengths above the version 1 limits.
-5. Rejects a DELETE with a nonzero value length.
-6. Computes the bounded total record size and requires that many input bytes.
+5. Computes the bounded total record size and requires that many input bytes.
 
 The decoder returns the number of bytes consumed, allowing a caller to advance
 to the next record. Extra bytes after one complete record are not an error

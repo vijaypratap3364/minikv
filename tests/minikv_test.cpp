@@ -50,8 +50,11 @@ void test_missing_and_delete(TestRunner& tests,
                  "erasing a missing key does not append a record");
 
     store.put("temporary", "value");
+    const auto log_size_before_delete = std::filesystem::file_size(log_path);
     tests.expect(store.erase("temporary"),
                  "erase returns true for an existing key");
+    tests.expect(std::filesystem::file_size(log_path) == log_size_before_delete,
+                 "erasing an existing key remains in-memory only");
     tests.expect(!store.contains("temporary"),
                  "an erased key is no longer contained");
     tests.expect(!store.get("temporary").has_value(),
@@ -108,14 +111,16 @@ void test_independent_instances(TestRunner& tests,
                  "erasing from one instance does not affect another");
 }
 
-void test_mutations_are_appended(TestRunner& tests,
-                                 const std::filesystem::path& log_path) {
+void test_only_puts_are_appended(TestRunner& tests,
+                                const std::filesystem::path& log_path) {
     {
         minikv::MiniKV store(log_path);
         store.put("name", "Vijay");
         store.put("name", "MiniKV");
         tests.expect(store.erase("name"),
-                     "delete succeeds after persistent puts");
+                     "in-memory delete succeeds after persistent puts");
+        tests.expect(!store.contains("name"),
+                     "in-memory delete removes the current value");
     }
 
     const auto bytes = minikv::test::read_file(log_path);
@@ -138,15 +143,8 @@ void test_mutations_are_appended(TestRunner& tests,
                                       "MiniKV"},
                  "overwrite appends another put record");
 
-    const auto third = minikv::detail::decode_record(input.subspan(offset));
-    offset += third.bytes_consumed;
-    tests.expect(third.record == minikv::detail::Record{
-                                     minikv::detail::Operation::Delete,
-                                     "name",
-                                     {}},
-                 "delete appends a tombstone record");
     tests.expect(offset == bytes.size(),
-                 "the integration log contains exactly three records");
+                 "delete appends no third record during Stage 2");
 }
 
 void test_rejected_put_does_not_change_state(
@@ -179,7 +177,7 @@ int main() {
     test_empty_and_binary_data(
         tests, temporary_directory.path() / "binary.minikv");
     test_independent_instances(tests, temporary_directory.path());
-    test_mutations_are_appended(
+    test_only_puts_are_appended(
         tests, temporary_directory.path() / "mutations.minikv");
     test_rejected_put_does_not_change_state(
         tests, temporary_directory.path() / "rejected.minikv");

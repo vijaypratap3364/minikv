@@ -16,7 +16,6 @@ inline constexpr std::size_t maximum_value_size = 4U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
     Put = 1,
-    Delete = 2,
 };
 
 struct Record {

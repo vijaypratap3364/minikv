@@ -23,19 +23,20 @@ by the next one.
 ## Stage 2 — binary records and append-only persistence (complete)
 
 - Introduce a documented binary record format.
-- Append PUT and DELETE mutations to one storage log before changing memory.
-- Represent deletion with a tombstone and return record byte offsets from appends.
+- Append PUT records to one storage log before changing memory.
+- Keep DELETE in-memory only and return record byte offsets from PUT appends.
 - Validate versions, operations, limits, malformed headers, and truncated input.
 - Deliberately do not rebuild the in-memory index at startup yet.
 
 ## Stage 3 — restart recovery
 
 - Scan and decode records from the start of the log.
-- Replay PUTs and tombstones to rebuild the in-memory state.
+- Replay PUTs to rebuild the in-memory state.
 - Define explicit startup behavior for malformed input.
 
-## Stage 4 — corruption boundaries and durability
+## Stage 4 — persistent deletion and recovery hardening
 
+- Add DELETE tombstone records and replay them during recovery.
 - Add checksums and record validation.
 - Detect and ignore an incomplete tail record after a torn write.
 - Define flush/sync behavior and make durability guarantees explicit.

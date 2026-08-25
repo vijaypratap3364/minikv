@@ -34,15 +34,7 @@ std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
 }
 
 bool MiniKV::erase(const Key& key) {
-    const auto entry = entries_.find(key);
-    if (entry == entries_.end()) {
-        return false;
-    }
-
-    const detail::Record record{detail::Operation::Delete, key, {}};
-    static_cast<void>(storage_log_->append(record));
-    entries_.erase(entry);
-    return true;
+    return entries_.erase(key) != 0;
 }
 
 bool MiniKV::contains(const Key& key) const {

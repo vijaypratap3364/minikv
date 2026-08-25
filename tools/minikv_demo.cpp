@@ -22,6 +22,7 @@ int main(int argument_count, char* arguments[]) {
         static_cast<void>(store.erase("language"));
         std::cout << "keys after delete: " << store.size() << '\n';
         std::cout << "records appended to " << log_path << '\n';
+        std::cout << "DELETE is in-memory only during Stage 2\n";
         std::cout << "restart recovery is not implemented yet\n";
         return 0;
     } catch (const std::exception& error) {

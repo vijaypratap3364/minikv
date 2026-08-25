@@ -33,8 +33,8 @@ public:
     // Returns a copy of the value, or std::nullopt when the key is absent.
     [[nodiscard]] std::optional<Value> get(const Key& key) const;
 
-    // Appends a tombstone and returns true only when an existing key is removed.
-    // Throws without changing the in-memory state if the log append fails.
+    // Removes only in-memory state during Stage 2. Persistent deletion is
+    // intentionally deferred until Stage 4.
     [[nodiscard]] bool erase(const Key& key);
 
     [[nodiscard]] bool contains(const Key& key) const;
