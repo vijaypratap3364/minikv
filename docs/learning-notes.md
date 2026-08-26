@@ -341,3 +341,83 @@ storage layers instead of being batched in memory. Applications must choose
 between that latency and the weaker buffered boundary. MiniKV also still assumes
 one unsynchronized user at a time; Stage 6 must define safe multithreaded access
 without weakening disk-first mutation ordering or recovery behavior.
+
+## Multithreaded access: one clear critical section
+
+### 1. What problem existed?
+
+Stage 5 had shared mutable state but no synchronization. A race condition occurs
+when threads access the same state at the same time, at least one access changes
+it, and their ordering is not controlled. The result can depend on timing and,
+for ordinary C++ containers, can be undefined behavior rather than merely an
+unexpected winner.
+
+The index can rehash while another thread reads it. The storage log has one
+active append stream, one current end offset, one read stream with a mutable seek
+position, and append-failure metadata. Without a lock, concurrent `PUT A=1` and
+`PUT B=2` could interfere with file output, assign incorrect locations, race in
+the hash table, or leave the disk record order inconsistent with the index.
+
+### 2. What did we build?
+
+Each `MiniKV` now owns one `std::mutex`. A mutex lets only one thread own a
+protected region at a time. That protected region is called a critical section:
+code that must execute as one coordinated unit with respect to other threads.
+
+All API operations acquire the mutex. PUT and DELETE hold it across record
+creation, disk append, optional durable sync, and the following index change.
+GET holds it across index lookup and the complete seek/read/decode operation.
+`contains`, `size`, and `empty` also lock before inspecting the index.
+
+### 3. How does it solve the problem?
+
+Only one operation at a time can touch an instance's index, streams, current
+offset, or failure flag. A successful writer finishes its append before changing
+the index, while a failed append leaves the index alone. Readers therefore see a
+state before or after a mutation, never the half-finished relationship between
+its disk record and memory entry.
+
+Deterministic tests use barriers to release threads together. They cover many
+GETs, PUTs to different and identical keys, GET racing with PUT or DELETE,
+mixed PUT/DELETE contention, and a restart whose recovered state must match the
+state observed after all concurrent calls finish.
+
+### 4. What happens internally?
+
+The current lock granularity is one coarse lock for an entire MiniKV instance.
+It is an exclusive/write lock in effect: while one caller owns it, every other
+caller waits, even when both callers only want to read. This makes the invariant
+between the log and index easy to inspect and explain.
+
+A shared/read lock is a mode that multiple readers may hold together. An
+exclusive/write lock prevents both other writers and readers. C++ offers those
+modes through `std::shared_mutex`, but MiniKV does not use it yet. The current
+storage layer has a single read stream whose seek position and error flags are
+mutable. Safe parallel GET I/O needs positional reads or independent handles,
+not merely replacing the mutex type.
+
+### 5. What can still go wrong?
+
+Correct locking usually reduces concurrency because waiting threads cannot make
+progress inside the protected region. MiniKV even holds its lock during disk
+I/O and durable sync, so a slow mutation delays unrelated keys and all readers.
+The design promises thread safety, not maximum parallel throughput or fairness.
+
+A deadlock is a permanent wait cycle: for example, one thread holds lock A while
+waiting for B and another holds B while waiting for A. Normal MiniKV calls take
+one instance lock once, do not recursively call locking API methods, and never
+upgrade a read lock, so they cannot create that cycle. Move assignment locks two
+instances with `std::scoped_lock`, which provides deadlock avoidance.
+
+The mutex protects only one object. Two separate MiniKV instances or processes
+opening the same file can still race. The caller must also prevent an instance
+from being moved or destroyed while another thread is using it.
+
+### 6. What new problem does this design introduce?
+
+The coarse mutex deliberately trades throughput for a small correctness model.
+Measurements may later show that read parallelism or key-level concurrency is
+valuable. Before introducing shared locking, MiniKV needs a storage-read design
+whose file position is not shared, plus benchmarks proving the extra complexity
+addresses a real bottleneck. File growth from obsolete PUTs and tombstones also
+remains the next roadmap problem for segmentation and compaction.

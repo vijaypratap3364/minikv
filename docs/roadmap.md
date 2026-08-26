@@ -54,10 +54,13 @@ by the next one.
 - Offer buffered and sync durability modes through one Windows/POSIX boundary.
 - State the exact guarantee without claiming ACID or infallible hardware.
 
-## Stage 6 — multithreaded access
+## Stage 6 — multithreaded access (complete)
 
-- Protect engine state with straightforward standard-library synchronization.
-- Test parallel readers and writers before considering finer-grained locking.
+- Protect one engine instance with a coarse standard-library mutex.
+- Keep append, optional sync, and index mutation in one write critical section.
+- Test concurrent reads, writes, deletes, contention, and restart recovery.
+- Document the choice to defer finer-grained shared locking until storage reads
+  have an appropriate parallel-I/O design.
 
 ## Stage 7 — segments and compaction
 

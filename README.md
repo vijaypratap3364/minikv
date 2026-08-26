@@ -9,6 +9,7 @@ binary append-only log. It keeps an in-memory hash index from each live key to
 its newest PUT record location. Opening a database validates and replays PUTs
 and DELETE tombstones. A clearly incomplete final append is removed at its last
 verified boundary, while complete corruption remains a fatal error.
+Public operations on one live instance are safe to call from multiple threads.
 
 ## Design direction
 
@@ -55,6 +56,12 @@ removing that key from the index; erasing a missing key returns `false` without
 writing. PUTs and tombstones reach the log before memory changes. Empty strings
 and embedded NUL bytes are valid in keys and PUT values, within the documented
 size limits.
+
+MiniKV currently uses one mutex per instance, so concurrent calls are safe but
+serialize at the API boundary, including GETs. Do not open the same log through
+multiple `MiniKV` instances or processes concurrently; coordination is only
+within one instance. The caller must also ensure the instance is not moved or
+destroyed while another thread is using it.
 
 See [the version 2 file format](docs/file-format.md) for the byte layout, CRC-32,
 and validation rules. `DurabilityMode::Buffered` (the default) flushes C++ stream

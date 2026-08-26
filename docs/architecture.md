@@ -5,11 +5,12 @@
 MiniKV records PUTs and DELETE tombstones in a checksummed, versioned append-only
 file. Its in-memory hash index maps each live key to its newest PUT record's
 offset and encoded size. Values remain in the log and are read from disk on
-demand.
+demand. One `MiniKV` instance can be used safely by multiple threads.
 
 ```text
 Client PUT
   -> minikv::MiniKV logical operation
+  -> acquire the instance mutex
   -> Record encoder
   -> StorageLog append + stream flush
   -> log file / OS page cache
@@ -17,6 +18,7 @@ Client PUT
   -> in-memory key-to-record-location update
 
 Client DELETE for an existing key
+  -> acquire the instance mutex
   -> Record encoder creates a tombstone
   -> StorageLog append + stream flush
   -> log file / OS page cache
@@ -24,6 +26,7 @@ Client DELETE for an existing key
   -> remove key from the in-memory index
 
 Client GET
+  -> acquire the instance mutex
   -> in-memory index lookup
   -> StorageLog read at indexed offset
   -> Record decoder and key validation
@@ -65,8 +68,10 @@ format remains fatal and is never truncated.
 
 Empty keys and values are valid. A present empty value is distinguishable from a
 missing key because only the latter returns `std::nullopt`. Keys and values may
-contain arbitrary bytes, including NUL. This stage provides no synchronization;
-concurrent access to the same instance is not supported.
+contain arbitrary bytes, including NUL. Calls through one live `MiniKV` instance
+are synchronized. Independently opening the same log through multiple instances
+or processes is not supported because the per-instance mutex cannot coordinate
+their streams, offsets, or indexes.
 
 If PUT or DELETE encoding, append, stream flush, or durable sync fails, the
 exception reaches the caller and the in-memory index is not changed. Because a
@@ -80,6 +85,47 @@ deletion. A pathological collision pattern can degrade an operation to linear
 time. `GET` additionally performs a seek and reads and decodes one record, while
 startup recovery is linear in the file's records and bytes. Hashing still
 examines the key bytes, so key and value lengths affect real cost.
+
+## Concurrency model
+
+The shared mutable state and its unsynchronized failure modes are:
+
+| State | What can race without a lock |
+| --- | --- |
+| Hash index | Concurrent lookup, insertion, rehash, and erase would access `std::unordered_map` unsafely and can corrupt its internal structure. |
+| Append stream and file bytes | Two writers could race on stream state or produce records in an order neither caller can relate to its index update. |
+| Next append offset | Writers could calculate overlapping or incorrect record locations and lose offset updates. |
+| Read stream | Concurrent seeks and reads would overwrite the stream's shared file position and status flags. |
+| Append-failure metadata | One thread could miss another thread's failure and continue using an instance whose append outcome is ambiguous. |
+
+For example, without synchronization, concurrent `PUT A=1` and `PUT B=2`
+could both observe the same end offset, interfere with the append stream, and
+race while changing the hash table. The resulting index might point at the
+wrong record even if the file bytes happened to remain parseable.
+
+MiniKV uses one `std::mutex` per instance. Every public operation that observes
+or changes engine state acquires it. The critical section for PUT and DELETE
+includes encoding, append, optional durable sync, and the index change. This
+preserves disk-first ordering: no reader can observe a new index entry before
+its record append succeeds. GET holds the same lock across index lookup, file
+seek, record read, checksum validation, and value copy, so another operation
+cannot change the stream position or indexed state partway through the read.
+Recovery runs during construction before the instance can be shared.
+
+This is deliberately coarse per-instance lock granularity. A mutex provides
+exclusive ownership, so even unrelated keys and concurrent GETs are serialized.
+A `std::shared_mutex` could instead grant shared/read locks to multiple GETs and
+exclusive/write locks to mutations. It is not used yet because the current
+storage layer has one mutable read stream; truly parallel reads first need an
+appropriate positional-I/O or independent-handle design. The single mutex is a
+smaller correctness boundary, at the cost of less concurrency.
+
+A deadlock occurs when threads wait forever for locks held in a cycle. Ordinary
+MiniKV calls acquire exactly one instance mutex once and never upgrade or nest
+that lock, so they cannot form such a cycle. Move assignment is the sole
+two-instance operation and uses `std::scoped_lock`, which acquires both mutexes
+with deadlock avoidance. Moving, destroying, or otherwise ending the lifetime of
+an instance while other threads use it still requires external coordination.
 
 ## Intended storage architecture
 

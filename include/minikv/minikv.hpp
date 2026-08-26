@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -33,8 +34,8 @@ public:
 
     MiniKV(const MiniKV&) = delete;
     MiniKV& operator=(const MiniKV&) = delete;
-    MiniKV(MiniKV&&) noexcept;
-    MiniKV& operator=(MiniKV&&) noexcept;
+    MiniKV(MiniKV&& other);
+    MiniKV& operator=(MiniKV&& other);
 
     // Inserts a new key or replaces the value stored for an existing key.
     // Throws without changing the in-memory state if the log append fails.
@@ -48,8 +49,8 @@ public:
     [[nodiscard]] bool erase(const Key& key);
 
     [[nodiscard]] bool contains(const Key& key) const;
-    [[nodiscard]] std::size_t size() const noexcept;
-    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] bool empty() const;
 
 private:
     struct IndexEntry {
@@ -59,6 +60,7 @@ private:
 
     void recover();
 
+    mutable std::mutex mutex_;
     std::unique_ptr<detail::StorageLog> storage_log_;
     std::unordered_map<Key, IndexEntry> index_;
 };

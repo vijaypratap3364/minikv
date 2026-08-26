@@ -7,6 +7,8 @@ project(
     LANGUAGES CXX
 )
 
+find_package(Threads REQUIRED)
+
 function(minikv_enable_warnings target_name)
     if(MSVC)
         target_compile_options(${target_name} PRIVATE /W4 /permissive-)
@@ -26,6 +28,7 @@ add_library(
 add_library(MiniKV::minikv ALIAS minikv)
 
 target_compile_features(minikv PUBLIC cxx_std_20)
+target_link_libraries(minikv PUBLIC Threads::Threads)
 target_include_directories(
     minikv
     PUBLIC
@@ -58,6 +61,11 @@ if(BUILD_TESTING)
     endfunction()
 
     minikv_add_test(minikv_tests tests/minikv_test.cpp minikv.api)
+    minikv_add_test(
+        concurrency_tests
+        tests/concurrency_test.cpp
+        minikv.concurrency
+    )
     minikv_add_test(record_tests tests/record_test.cpp minikv.record)
     minikv_add_test(
         storage_log_tests

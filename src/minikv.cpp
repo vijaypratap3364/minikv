@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 namespace minikv {
@@ -18,10 +19,26 @@ MiniKV::MiniKV(std::filesystem::path log_path,
 }
 
 MiniKV::~MiniKV() = default;
-MiniKV::MiniKV(MiniKV&&) noexcept = default;
-MiniKV& MiniKV::operator=(MiniKV&&) noexcept = default;
+
+MiniKV::MiniKV(MiniKV&& other) {
+    std::unique_lock lock(other.mutex_);
+    storage_log_ = std::move(other.storage_log_);
+    index_ = std::move(other.index_);
+}
+
+MiniKV& MiniKV::operator=(MiniKV&& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    std::scoped_lock lock(mutex_, other.mutex_);
+    storage_log_ = std::move(other.storage_log_);
+    index_ = std::move(other.index_);
+    return *this;
+}
 
 void MiniKV::put(Key key, Value value) {
+    std::lock_guard lock(mutex_);
     detail::Record record{
         detail::Operation::Put, std::move(key), std::move(value)};
     const auto location = storage_log_->append(record);
@@ -30,6 +47,7 @@ void MiniKV::put(Key key, Value value) {
 }
 
 std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
+    std::lock_guard lock(mutex_);
     const auto entry = index_.find(key);
     if (entry == index_.end()) {
         return std::nullopt;
@@ -45,6 +63,7 @@ std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
 }
 
 bool MiniKV::erase(const Key& key) {
+    std::lock_guard lock(mutex_);
     const auto entry = index_.find(key);
     if (entry == index_.end()) {
         return false;
@@ -57,14 +76,17 @@ bool MiniKV::erase(const Key& key) {
 }
 
 bool MiniKV::contains(const Key& key) const {
+    std::lock_guard lock(mutex_);
     return index_.contains(key);
 }
 
-std::size_t MiniKV::size() const noexcept {
+std::size_t MiniKV::size() const {
+    std::lock_guard lock(mutex_);
     return index_.size();
 }
 
-bool MiniKV::empty() const noexcept {
+bool MiniKV::empty() const {
+    std::lock_guard lock(mutex_);
     return index_.empty();
 }
 
