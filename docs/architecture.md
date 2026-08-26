@@ -12,13 +12,15 @@ Client PUT
   -> minikv::MiniKV logical operation
   -> Record encoder
   -> StorageLog append + stream flush
-  -> disk file
+  -> log file / OS page cache
+  -> optional OS durable sync request
   -> in-memory key-to-record-location update
 
 Client DELETE for an existing key
   -> Record encoder creates a tombstone
   -> StorageLog append + stream flush
-  -> disk file
+  -> log file / OS page cache
+  -> optional OS durable sync request
   -> remove key from the in-memory index
 
 Client GET
@@ -32,6 +34,7 @@ Startup
   -> validate format, length, and CRC-32 of each record
   -> PUT assigns its location to the key
   -> DELETE removes the key
+  -> incomplete EOF record truncates back to the last valid offset
 
 Client CONTAINS
   -> in-memory index
@@ -46,9 +49,10 @@ Each `MiniKV` is constructed with a log path. Opening creates the file if needed
 discovers its current size, and scans records sequentially from offset zero.
 Applying records in order makes the newest operation for a key win. A later PUT
 replaces an earlier location, while a later DELETE removes it. Empty and
-nonexistent database files recover as empty databases. Invalid format, checksum
-mismatch, and incomplete content raise distinct record errors; Stage 4 does not
-silently ignore or repair corruption.
+nonexistent database files recover as empty databases. If EOF arrives partway
+through the next record, recovery keeps every checksum-verified record and
+truncates the incomplete tail. A complete checksum mismatch or invalid record
+format remains fatal and is never truncated.
 
 ## API semantics
 
@@ -64,10 +68,12 @@ missing key because only the latter returns `std::nullopt`. Keys and values may
 contain arbitrary bytes, including NUL. This stage provides no synchronization;
 concurrent access to the same instance is not supported.
 
-If PUT or DELETE encoding or append/flush fails, the exception reaches the
-caller and the in-memory index is not changed. A partial failed write may still
-leave a torn tail on disk; the next startup reports an incomplete record rather
-than repairing it.
+If PUT or DELETE encoding, append, stream flush, or durable sync fails, the
+exception reaches the caller and the in-memory index is not changed. Because a
+failed system call can have an ambiguous outcome, that `MiniKV` instance rejects
+later appends. Restart validates the file: a partial final append is truncated,
+while a complete valid record may be replayed even if its caller observed a sync
+error.
 
 The hash table gives expected average constant-time index lookup, insertion, and
 deletion. A pathological collision pattern can degrade an operation to linear
@@ -94,14 +100,49 @@ longer indexed when superseded, but they make the file grow until a later
 compaction stage rewrites only live data. Tombstones also remain because the log
 is never rewritten in place. Every version 2 record carries a CRC-32 that detects
 many accidental byte changes, but it neither repairs data nor authenticates it
-against deliberate modification. Stream flush is also not a power-loss
-durability guarantee; explicit OS sync policy comes later.
+against deliberate modification.
+
+## Crash recovery policy
+
+Recovery trusts only complete records whose format and CRC-32 validate. When a
+sequential read begins at a verified record boundary but EOF arrives before the
+next header, payload, or checksum is complete, MiniKV classifies all remaining
+bytes as a torn final append. It resizes the file to that verified boundary and
+continues with the recovered index. In Sync mode, it also syncs the truncation.
+
+This rule is intentionally limited to EOF truncation. Invalid magic, version,
+operation, bounds, tombstone shape, or a checksum mismatch in a complete record
+aborts opening and leaves the file unchanged. MiniKV does not search for a later
+magic sequence, because guessing a new boundary could silently discard or
+misinterpret established data. A bounded length field corrupted so that it
+extends beyond EOF is indistinguishable from a torn append and therefore follows
+the documented tail-truncation policy.
+
+## Durability modes
+
+`DurabilityMode::Buffered` is the default. Each append is written and the C++
+stream is flushed before the index changes, but the bytes may exist only in the
+operating system's page cache. A process crash does not erase the OS page cache,
+but an OS crash or power loss can lose those writes.
+
+`DurabilityMode::Sync` performs the same stream flush and then calls the one
+platform boundary in `platform_sync.cpp`: `FlushFileBuffers` on Windows and
+`fsync` on POSIX. The index changes and the operation returns only after that
+call succeeds. Under the operating system and storage device's documented
+contract, this provides a power-loss durability request for the log file's data
+and length. It does not sync the parent directory entry for a newly created log,
+and hardware or virtualized storage can still violate flush guarantees.
+
+Sync mode is slower because it reduces batching and waits for lower storage
+layers. Neither mode provides transactions across multiple records, isolation,
+atomic multi-key changes, authentication, or a general ACID guarantee.
 
 ## Boundaries
 
 - `include/minikv`: public library interface
 - `src/record.*`: private binary record model and codec
 - `src/storage_log.*`: private append-only disk I/O
+- `src/platform_sync.*`: one Windows/POSIX durable-flush boundary
 - `src/minikv.cpp`: logical operation ordering and in-memory state
 - `tools`: small programs that use the public interface
 - `tests`: deterministic local checks

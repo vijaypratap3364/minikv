@@ -41,22 +41,31 @@ by the next one.
 - Add DELETE tombstone records and replay them during recovery.
 - Add CRC-32 checksums and verify them on every decoded record.
 - Distinguish invalid format, checksum mismatch, and incomplete records.
-- Reject an incomplete tail explicitly; automatic repair remains future work.
+- Reject an incomplete tail explicitly; automatic repair remains Stage 5 work.
 - Keep the current stream-flush behavior explicit without claiming power-loss
   durability.
 
-## Stage 5 — multithreaded access
+## Stage 5 — crash safety and durability (complete)
+
+- Truncate a clearly incomplete final append to the last verified record.
+- Keep invalid format and complete checksum corruption fatal.
+- Test partial headers, keys, values, checksums, and complete records with
+  deterministic byte-prefix fault injection.
+- Offer buffered and sync durability modes through one Windows/POSIX boundary.
+- State the exact guarantee without claiming ACID or infallible hardware.
+
+## Stage 6 — multithreaded access
 
 - Protect engine state with straightforward standard-library synchronization.
 - Test parallel readers and writers before considering finer-grained locking.
 
-## Stage 6 — segments and compaction
+## Stage 7 — segments and compaction
 
 - Rotate bounded segment files.
 - Rewrite only live records during compaction.
 - Make replacement crash-safe and recovery-aware.
 
-## Stage 7 — measurement and automation
+## Stage 8 — measurement and automation
 
 - Add representative read/write benchmarks.
 - Profile before optimizing.

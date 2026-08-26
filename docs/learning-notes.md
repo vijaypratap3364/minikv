@@ -266,3 +266,78 @@ Updates and deletes therefore leave obsolete records behind and the file keeps
 growing. Compaction must eventually rewrite only the state that still matters.
 Before compaction, later work also needs a precise OS-level sync policy and a
 safe policy for recovering or repairing an incomplete final record.
+
+## Crash-safe tails and explicit durability
+
+### 1. What problem existed?
+
+An append can stop after only part of its header, key, value, or checksum has
+been written. This is a torn write. Stage 4 correctly called the last record
+incomplete, but it refused to open the database afterward, so one interrupted
+append made every earlier valid record inaccessible until manual intervention.
+
+There was also only one vaguely described persistence behavior. Calling
+`write`, flushing a C++ stream, asking the operating system to sync a file, and
+physically storing bits are different boundaries and must not be presented as
+the same guarantee.
+
+### 2. What did we build?
+
+Recovery now truncates a clearly incomplete final record back to the offset
+immediately after the last format-valid, checksum-valid record. It never
+truncates a complete record with invalid structure or a checksum mismatch.
+
+We also added two configurable modes. `DurabilityMode::Buffered` is the default.
+`DurabilityMode::Sync` uses a small platform boundary that calls
+`FlushFileBuffers` on Windows and `fsync` on POSIX. The append and any requested
+sync finish before MiniKV changes the in-memory index.
+
+### 3. How does it solve the problem?
+
+The end of the last valid record is a safe append boundary. If EOF occurs before
+the next record is complete, removing only those remaining bytes restores a log
+that can be replayed and appended to normally. Earlier PUTs and tombstones keep
+their original order and checksums.
+
+The durability mode makes the tradeoff explicit. Buffered mode avoids waiting
+for stable storage on every mutation. Sync mode waits for the operating system's
+durable-file flush request before reporting success, giving applications a
+stronger persistence boundary when they need one.
+
+### 4. What happens internally?
+
+A buffered `write` usually copies bytes into user-space or kernel buffers rather
+than directly onto storage media. Flushing the C++ stream pushes its user-space
+buffer toward the operating system. The OS normally keeps those bytes in its
+page cache: memory used to combine, schedule, and accelerate file I/O. A process
+crash leaves the OS and its cache alive, but a kernel crash or power loss does
+not.
+
+In Sync mode, MiniKV follows the stream flush with `FlushFileBuffers` or `fsync`.
+Those calls ask the OS to send the file's data and length through the storage
+stack before returning. On recovery, MiniKV reads sequentially. EOF during the
+next record triggers a resize to the last verified offset; in Sync mode that
+resize is synced too. Complete corruption throws and leaves the file untouched.
+
+### 5. What can still go wrong?
+
+Even after a successful sync call, physical persistence ultimately depends on
+the OS, device firmware, controller, and storage hardware honoring their flush
+contracts. MiniKV does not sync the parent directory entry when a brand-new log
+file is created. A failed sync can also be ambiguous: the record may have reached
+disk even though the caller received an exception. MiniKV leaves the index
+unchanged, rejects later appends on that instance, and lets restart validation
+decide what is present.
+
+A bounded length field corrupted so it extends beyond EOF looks exactly like a
+torn append and follows the truncation policy. CRC-32 still is not
+authentication. There are no multi-record transactions, concurrency controls,
+replicas, or general ACID guarantees.
+
+### 6. What new problem does this design introduce?
+
+Durable sync can reduce throughput because every mutation may wait for slower
+storage layers instead of being batched in memory. Applications must choose
+between that latency and the weaker buffered boundary. MiniKV also still assumes
+one unsynchronized user at a time; Stage 6 must define safe multithreaded access
+without weakening disk-first mutation ordering or recovery behavior.

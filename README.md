@@ -7,7 +7,8 @@ persistence, indexing, recovery, concurrency, compaction, and performance.
 The project writes `PUT` and `DELETE` operations to a checksummed, versioned
 binary append-only log. It keeps an in-memory hash index from each live key to
 its newest PUT record location. Opening a database validates and replays PUTs
-and DELETE tombstones, so both values and deletions survive restart.
+and DELETE tombstones. A clearly incomplete final append is removed at its last
+verified boundary, while complete corruption remains a fatal error.
 
 ## Design direction
 
@@ -36,7 +37,9 @@ No database, service, VM, WSL installation, or Docker installation is required.
 ```cpp
 #include "minikv/minikv.hpp"
 
-minikv::MiniKV store("example.minikv");
+minikv::MiniKV store(
+    "example.minikv",
+    minikv::DurabilityMode::Sync);
 store.put("course", "storage systems");
 
 if (const auto value = store.get("course")) {
@@ -54,10 +57,11 @@ and embedded NUL bytes are valid in keys and PUT values, within the documented
 size limits.
 
 See [the version 2 file format](docs/file-format.md) for the byte layout, CRC-32,
-and validation rules. Startup distinguishes invalid format, checksum mismatch,
-and incomplete input instead of silently skipping corruption. This stage
-flushes the C++ file stream after each record but does not yet promise power-loss
-durability.
+and validation rules. `DurabilityMode::Buffered` (the default) flushes C++ stream
+buffers into the operating system's caching path. `DurabilityMode::Sync` also
+calls `FlushFileBuffers` on Windows or `fsync` on POSIX before changing the
+in-memory index. Sync mode is stronger and slower, but it is not an ACID claim or
+an absolute guarantee against hardware that does not honor flush requests.
 
 ## Build and run
 

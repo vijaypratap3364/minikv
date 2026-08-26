@@ -1,3 +1,5 @@
+#include "minikv/minikv.hpp"
+
 #include "record.hpp"
 #include "storage_log.hpp"
 #include "test_support.hpp"
@@ -31,7 +33,7 @@ void test_append_and_offsets(TestRunner& tests,
     std::vector<AppendResult> locations;
 
     {
-        StorageLog log(log_path);
+        StorageLog log(log_path, minikv::DurabilityMode::Buffered);
         for (const auto& record : expected) {
             locations.push_back(log.append(record));
         }
@@ -68,13 +70,13 @@ void test_reopen_continues_at_end(TestRunner& tests,
                                   const std::filesystem::path& log_path) {
     AppendResult first{};
     {
-        StorageLog log(log_path);
+        StorageLog log(log_path, minikv::DurabilityMode::Buffered);
         first = log.append(Record{Operation::Put, "first", "one"});
     }
 
     AppendResult second{};
     {
-        StorageLog log(log_path);
+        StorageLog log(log_path, minikv::DurabilityMode::Buffered);
         second = log.append(Record{Operation::Put, "second", "two"});
     }
 
@@ -88,7 +90,7 @@ void test_reopen_continues_at_end(TestRunner& tests,
 void test_records_can_be_read_by_location(
     TestRunner& tests,
     const std::filesystem::path& log_path) {
-    StorageLog log(log_path);
+    StorageLog log(log_path, minikv::DurabilityMode::Buffered);
     const Record first{Operation::Put, "first", "one"};
     const Record second{Operation::Delete, "first", {}};
     const auto first_location = log.append(first);
@@ -115,7 +117,7 @@ void test_corruption_is_detected_on_read(
     encoded[minikv::detail::record_header_size] ^= 0x01;
     minikv::test::write_file(log_path, encoded);
 
-    StorageLog log(log_path);
+    StorageLog log(log_path, minikv::DurabilityMode::Buffered);
     tests.expect_throws<ChecksumMismatchError>(
         [&] { static_cast<void>(log.read_at(0)); },
         "storage reads verify the record checksum");
@@ -126,12 +128,13 @@ void test_errors_do_not_create_logical_records(
     const std::filesystem::path& directory) {
     tests.expect_throws<StorageError>(
         [&] {
-            StorageLog log(directory / "missing" / "cannot-open.minikv");
+            StorageLog log(directory / "missing" / "cannot-open.minikv",
+                           minikv::DurabilityMode::Buffered);
         },
         "opening a log in a missing directory fails explicitly");
 
     const auto log_path = directory / "invalid-record.minikv";
-    StorageLog log(log_path);
+    StorageLog log(log_path, minikv::DurabilityMode::Buffered);
     tests.expect_throws<RecordError>(
         [&] {
             static_cast<void>(log.append(Record{

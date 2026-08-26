@@ -4,6 +4,7 @@
 #include "record.hpp"
 #include "test_support.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -308,6 +309,121 @@ void test_delete_then_reinsert(
                  "reinsertion rebuilds one live index entry");
 }
 
+void test_durability_modes(
+    TestRunner& tests,
+    const std::filesystem::path& directory) {
+    for (const auto mode : {minikv::DurabilityMode::Buffered,
+                            minikv::DurabilityMode::Sync}) {
+        const auto log_path =
+            directory /
+            (mode == minikv::DurabilityMode::Buffered
+                 ? "buffered-durability.minikv"
+                 : "sync-durability.minikv");
+        {
+            minikv::MiniKV store(log_path, mode);
+            store.put("kept", "value");
+            store.put("deleted", "value");
+            tests.expect(store.erase("deleted"),
+                         "each durability mode persists tombstones");
+        }
+
+        minikv::MiniKV reopened(log_path, mode);
+        tests.expect(reopened.get("kept") ==
+                         std::optional<std::string>{"value"},
+                     "each durability mode recovers PUT records");
+        tests.expect(!reopened.get("deleted").has_value(),
+                     "each durability mode recovers DELETE records");
+    }
+}
+
+void test_torn_tail_recovery(
+    TestRunner& tests,
+    const std::filesystem::path& directory) {
+    const auto first = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "A", "1"});
+    const auto second = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "B", "2"});
+    const std::string torn_key{"candidate-key"};
+    const std::string torn_value{"candidate-value"};
+    const auto candidate = minikv::detail::encode_record(
+        minikv::detail::Record{
+            minikv::detail::Operation::Put, torn_key, torn_value});
+
+    std::vector<char> valid_prefix = first;
+    valid_prefix.insert(valid_prefix.end(), second.begin(), second.end());
+    const auto valid_prefix_size = valid_prefix.size();
+
+    struct TornCase {
+        const char* name;
+        std::size_t prefix_size;
+        minikv::DurabilityMode mode;
+    };
+    const std::vector<TornCase> cases{
+        {"partial-header", 7, minikv::DurabilityMode::Buffered},
+        {"complete-header", minikv::detail::record_header_size,
+         minikv::DurabilityMode::Buffered},
+        {"partial-key", minikv::detail::record_header_size + 3,
+         minikv::DurabilityMode::Buffered},
+        {"partial-value",
+         minikv::detail::record_header_size + torn_key.size() + 4,
+         minikv::DurabilityMode::Buffered},
+        {"before-checksum",
+         candidate.size() - minikv::detail::record_checksum_size,
+         minikv::DurabilityMode::Sync},
+    };
+
+    for (const auto& fault : cases) {
+        auto bytes = valid_prefix;
+        bytes.insert(bytes.end(),
+                     candidate.begin(),
+                     candidate.begin() +
+                         static_cast<std::ptrdiff_t>(fault.prefix_size));
+        const auto log_path =
+            directory / (std::string(fault.name) + ".minikv");
+        minikv::test::write_file(log_path, bytes);
+
+        {
+            minikv::MiniKV recovered(log_path, fault.mode);
+            tests.expect(recovered.get("A") ==
+                             std::optional<std::string>{"1"},
+                         "torn-tail recovery preserves the first record");
+            tests.expect(recovered.get("B") ==
+                             std::optional<std::string>{"2"},
+                         "torn-tail recovery preserves the second record");
+            tests.expect(!recovered.get(torn_key).has_value(),
+                         "torn-tail recovery does not expose a partial record");
+            tests.expect(std::filesystem::file_size(log_path) ==
+                             valid_prefix_size,
+                         "torn-tail recovery truncates to the verified offset");
+            recovered.put("after-recovery", fault.name);
+        }
+
+        minikv::MiniKV reopened(log_path, fault.mode);
+        tests.expect(reopened.get("A") ==
+                         std::optional<std::string>{"1"} &&
+                         reopened.get("B") ==
+                             std::optional<std::string>{"2"},
+                     "earlier records remain recoverable after repair and append");
+        tests.expect(reopened.get("after-recovery") ==
+                         std::optional<std::string>{fault.name},
+                     "the repaired log accepts and recovers a new append");
+    }
+
+    auto complete_bytes = valid_prefix;
+    complete_bytes.insert(
+        complete_bytes.end(), candidate.begin(), candidate.end());
+    const auto complete_path = directory / "complete-record.minikv";
+    minikv::test::write_file(complete_path, complete_bytes);
+
+    minikv::MiniKV complete(complete_path);
+    tests.expect(complete.get(torn_key) ==
+                     std::optional<std::string>{torn_value},
+                 "a complete checksum-valid final record is recovered");
+    tests.expect(std::filesystem::file_size(complete_path) ==
+                     complete_bytes.size(),
+                 "recovery does not truncate a complete final record");
+}
+
 void test_corruption_fails_recovery(
     TestRunner& tests,
     const std::filesystem::path& directory) {
@@ -320,26 +436,26 @@ void test_corruption_fails_recovery(
         [&] { minikv::MiniKV store(invalid_magic_path); },
         "recovery distinguishes invalid record format");
 
+    auto valid_prefix = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "first", "one"});
     auto checksum_mismatch = minikv::detail::encode_record(
-        minikv::detail::Record{minikv::detail::Operation::Put, "key", "value"});
+        minikv::detail::Record{minikv::detail::Operation::Put, "second", "two"});
     checksum_mismatch[minikv::detail::record_header_size] ^= 0x01;
+    auto valid_suffix = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "third", "three"});
+    valid_prefix.insert(
+        valid_prefix.end(), checksum_mismatch.begin(), checksum_mismatch.end());
+    valid_prefix.insert(
+        valid_prefix.end(), valid_suffix.begin(), valid_suffix.end());
     const auto checksum_path = directory / "checksum-mismatch.minikv";
-    minikv::test::write_file(checksum_path, checksum_mismatch);
+    minikv::test::write_file(checksum_path, valid_prefix);
+    const auto corrupt_file_size = std::filesystem::file_size(checksum_path);
     tests.expect_throws<minikv::detail::ChecksumMismatchError>(
         [&] { minikv::MiniKV store(checksum_path); },
-        "recovery distinguishes a checksum mismatch");
-
-    auto valid = minikv::detail::encode_record(
-        minikv::detail::Record{minikv::detail::Operation::Put, "first", "one"});
-    auto truncated = minikv::detail::encode_record(
-        minikv::detail::Record{minikv::detail::Operation::Put, "second", "two"});
-    truncated.pop_back();
-    valid.insert(valid.end(), truncated.begin(), truncated.end());
-    const auto truncated_path = directory / "truncated-tail.minikv";
-    minikv::test::write_file(truncated_path, valid);
-    tests.expect_throws<minikv::detail::IncompleteRecordError>(
-        [&] { minikv::MiniKV store(truncated_path); },
-        "recovery distinguishes an incomplete tail record");
+        "recovery rejects checksum corruption between valid records");
+    tests.expect(std::filesystem::file_size(checksum_path) ==
+                     corrupt_file_size,
+                 "recovery never truncates complete corrupted data");
 }
 
 }  // namespace
@@ -372,6 +488,8 @@ int main() {
         tests, temporary_directory.path() / "delete-restart.minikv");
     test_delete_then_reinsert(
         tests, temporary_directory.path() / "delete-reinsert.minikv");
+    test_durability_modes(tests, temporary_directory.path());
+    test_torn_tail_recovery(tests, temporary_directory.path());
     test_corruption_fails_recovery(tests, temporary_directory.path());
 
     return tests.finish();

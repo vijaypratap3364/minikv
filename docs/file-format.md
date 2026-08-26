@@ -100,10 +100,12 @@ append points to the `M` in that record's magic. The in-memory index uses PUT
 offsets to find live values without scanning unrelated records.
 
 The storage log opens files in binary append mode and flushes the C++ stream
-after each record. Append failure is observable before MiniKV changes its index,
-but a stream flush is not an operating-system sync barrier and is not a
-power-loss durability guarantee.
+after each record. In buffered durability mode, that is the write-completion
+boundary before MiniKV changes its index. In sync mode, MiniKV additionally calls
+`FlushFileBuffers` on Windows or `fsync` on POSIX before changing the index.
 
-Startup validates every record. Invalid format, checksum mismatch, and an
-incomplete tail all abort opening with a controlled error. Stage 4 does not
-silently ignore or repair corruption.
+Startup validates records from offset zero. If the file ends before the next
+record's header, payload, or checksum is complete, MiniKV truncates the file to
+the last complete checksum-valid record and recovers all earlier state. Invalid
+format or checksum mismatch in a complete record aborts opening and leaves the
+file unchanged. No recovery path searches for a guessed later boundary.

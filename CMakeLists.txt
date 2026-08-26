@@ -18,6 +18,7 @@ endfunction()
 add_library(
     minikv
     src/minikv.cpp
+    src/platform_sync.cpp
     src/record.cpp
     src/storage_log.cpp
     src/version.cpp

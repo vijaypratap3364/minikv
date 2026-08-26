@@ -10,9 +10,10 @@
 
 namespace minikv {
 
-MiniKV::MiniKV(std::filesystem::path log_path)
-    : storage_log_(
-          std::make_unique<detail::StorageLog>(std::move(log_path))) {
+MiniKV::MiniKV(std::filesystem::path log_path,
+               DurabilityMode durability_mode)
+    : storage_log_(std::make_unique<detail::StorageLog>(
+          std::move(log_path), durability_mode)) {
     recover();
 }
 
@@ -70,19 +71,24 @@ bool MiniKV::empty() const noexcept {
 void MiniKV::recover() {
     std::uint64_t offset = 0;
     while (offset < storage_log_->size()) {
-        auto located = storage_log_->read_at(offset);
-        switch (located.record.operation) {
-            case detail::Operation::Put:
-                index_.insert_or_assign(
-                    std::move(located.record.key),
-                    IndexEntry{located.location.offset,
-                               located.location.size});
-                break;
-            case detail::Operation::Delete:
-                index_.erase(located.record.key);
-                break;
+        try {
+            auto located = storage_log_->read_at(offset);
+            switch (located.record.operation) {
+                case detail::Operation::Put:
+                    index_.insert_or_assign(
+                        std::move(located.record.key),
+                        IndexEntry{located.location.offset,
+                                   located.location.size});
+                    break;
+                case detail::Operation::Delete:
+                    index_.erase(located.record.key);
+                    break;
+            }
+            offset += located.location.size;
+        } catch (const detail::IncompleteRecordError&) {
+            storage_log_->truncate(offset);
+            break;
         }
-        offset += located.location.size;
     }
 }
 

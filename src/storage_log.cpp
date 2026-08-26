@@ -1,5 +1,8 @@
 #include "storage_log.hpp"
 
+#include "minikv/minikv.hpp"
+#include "platform_sync.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -11,13 +14,14 @@
 
 namespace minikv::detail {
 
-StorageLog::StorageLog(std::filesystem::path path)
-    : path_(std::move(path)),
-      append_stream_(path_, std::ios::binary | std::ios::out | std::ios::app),
-      read_stream_(path_, std::ios::binary | std::ios::in) {
-    if (!append_stream_.is_open() || !read_stream_.is_open()) {
-        throw StorageError("could not open storage log: " + path_.string());
+StorageLog::StorageLog(std::filesystem::path path,
+                       DurabilityMode durability_mode)
+    : path_(std::move(path)), durability_mode_(durability_mode) {
+    if (durability_mode_ != DurabilityMode::Buffered &&
+        durability_mode_ != DurabilityMode::Sync) {
+        throw StorageError("storage log has an invalid durability mode");
     }
+    open_streams();
 
     std::error_code error;
     const auto file_size = std::filesystem::file_size(path_, error);
@@ -33,6 +37,11 @@ StorageLog::StorageLog(std::filesystem::path path)
 }
 
 AppendResult StorageLog::append(const Record& record) {
+    if (append_failed_) {
+        throw StorageError(
+            "storage log cannot append after an earlier append failure");
+    }
+
     const auto encoded = encode_record(record);
     if (encoded.size() >
         static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
@@ -49,8 +58,15 @@ AppendResult StorageLog::append(const Record& record) {
                          static_cast<std::streamsize>(encoded.size()));
     append_stream_.flush();
     if (!append_stream_) {
+        append_failed_ = true;
         throw StorageError("could not append to storage log: " +
                            path_.string());
+    }
+    try {
+        sync_if_requested();
+    } catch (...) {
+        append_failed_ = true;
+        throw;
     }
 
     next_offset_ += encoded_size;
@@ -117,6 +133,51 @@ Record StorageLog::read(const AppendResult& location) const {
 
 std::uint64_t StorageLog::size() const noexcept {
     return next_offset_;
+}
+
+void StorageLog::truncate(std::uint64_t size) {
+    if (size > next_offset_) {
+        throw StorageError("cannot extend storage log during tail recovery");
+    }
+
+    append_stream_.close();
+    read_stream_.close();
+
+    std::error_code error;
+    std::filesystem::resize_file(
+        path_, static_cast<std::uintmax_t>(size), error);
+    if (error) {
+        throw StorageError("could not truncate incomplete storage log tail: " +
+                           error.message());
+    }
+
+    next_offset_ = size;
+    sync_if_requested();
+    open_streams();
+}
+
+void StorageLog::open_streams() {
+    append_stream_.clear();
+    read_stream_.clear();
+    append_stream_.open(
+        path_, std::ios::binary | std::ios::out | std::ios::app);
+    read_stream_.open(path_, std::ios::binary | std::ios::in);
+    if (!append_stream_.is_open() || !read_stream_.is_open()) {
+        throw StorageError("could not open storage log: " + path_.string());
+    }
+}
+
+void StorageLog::sync_if_requested() const {
+    if (durability_mode_ == DurabilityMode::Buffered) {
+        return;
+    }
+
+    try {
+        sync_file_to_storage(path_);
+    } catch (const std::system_error& error) {
+        throw StorageError("could not durably sync storage log: " +
+                           std::string(error.what()));
+    }
 }
 
 }  // namespace minikv::detail

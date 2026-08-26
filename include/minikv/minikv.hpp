@@ -10,6 +10,11 @@
 
 namespace minikv {
 
+enum class DurabilityMode {
+    Buffered,
+    Sync,
+};
+
 namespace detail {
 class StorageLog;
 }
@@ -19,7 +24,11 @@ public:
     using Key = std::string;
     using Value = std::string;
 
-    explicit MiniKV(std::filesystem::path log_path);
+    // Buffered flushes each record into the OS caching path. Sync additionally
+    // requests a platform durable flush before a mutation returns.
+    explicit MiniKV(
+        std::filesystem::path log_path,
+        DurabilityMode durability_mode = DurabilityMode::Buffered);
     ~MiniKV();
 
     MiniKV(const MiniKV&) = delete;
