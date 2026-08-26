@@ -111,4 +111,20 @@ private:
                              std::istreambuf_iterator<char>());
 }
 
+inline void write_file(const std::filesystem::path& path,
+                       const std::vector<char>& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        throw std::runtime_error("could not create test file: " + path.string());
+    }
+    if (!bytes.empty()) {
+        output.write(bytes.data(),
+                     static_cast<std::streamsize>(bytes.size()));
+    }
+    output.close();
+    if (!output) {
+        throw std::runtime_error("could not write test file: " + path.string());
+    }
+}
+
 }  // namespace minikv::test

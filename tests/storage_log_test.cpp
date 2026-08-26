@@ -83,6 +83,28 @@ void test_reopen_continues_at_end(TestRunner& tests,
                  "reopened append extends rather than overwrites the file");
 }
 
+void test_records_can_be_read_by_location(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    StorageLog log(log_path);
+    const Record first{Operation::Put, "first", "one"};
+    const Record second{Operation::Put, "second", "two"};
+    const auto first_location = log.append(first);
+    const auto second_location = log.append(second);
+
+    const auto located = log.read_at(second_location.offset);
+    tests.expect(located.record == second,
+                 "read_at returns the record at an exact byte offset");
+    tests.expect(located.location.offset == second_location.offset,
+                 "read_at preserves the record offset");
+    tests.expect(located.location.size == second_location.size,
+                 "read_at discovers the encoded record size");
+    tests.expect(log.read(first_location) == first,
+                 "read validates and returns an indexed record");
+    tests.expect(log.size() == first_location.size + second_location.size,
+                 "storage log exposes its current byte size");
+}
+
 void test_errors_do_not_create_logical_records(
     TestRunner& tests,
     const std::filesystem::path& directory) {
@@ -116,6 +138,8 @@ int main() {
         tests, temporary_directory.path() / "append.minikv");
     test_reopen_continues_at_end(
         tests, temporary_directory.path() / "reopen.minikv");
+    test_records_can_be_read_by_location(
+        tests, temporary_directory.path() / "read.minikv");
     test_errors_do_not_create_logical_records(tests,
                                               temporary_directory.path());
 

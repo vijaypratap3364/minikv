@@ -26,13 +26,15 @@ by the next one.
 - Append PUT records to one storage log before changing memory.
 - Keep DELETE in-memory only and return record byte offsets from PUT appends.
 - Validate versions, operations, limits, malformed headers, and truncated input.
-- Deliberately do not rebuild the in-memory index at startup yet.
+- Deliberately leave restart recovery to Stage 3.
 
-## Stage 3 — restart recovery
+## Stage 3 — persistent index and restart recovery (complete)
 
 - Scan and decode records from the start of the log.
-- Replay PUTs to rebuild the in-memory state.
-- Define explicit startup behavior for malformed input.
+- Rebuild an in-memory index from keys to their newest record locations.
+- Read values from their indexed records instead of retaining all values in RAM.
+- Reject malformed or truncated input explicitly during startup.
+- Keep old record versions on disk and defer compaction.
 
 ## Stage 4 — persistent deletion and recovery hardening
 

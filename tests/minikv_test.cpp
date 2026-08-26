@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -162,6 +163,141 @@ void test_rejected_put_does_not_change_state(
                  "a rejected put does not append log bytes");
 }
 
+void test_restart_and_newest_record_wins(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    {
+        minikv::MiniKV store(log_path);
+        store.put("A", "1");
+        store.put("B", "2");
+        store.put("A", "3");
+    }
+
+    minikv::MiniKV reopened(log_path);
+    tests.expect(reopened.size() == 2,
+                 "recovery rebuilds one index entry per key");
+    tests.expect(reopened.get("A") == std::optional<std::string>{"3"},
+                 "the newest record wins after restart");
+    tests.expect(reopened.get("B") == std::optional<std::string>{"2"},
+                 "an unchanged key survives restart");
+}
+
+void test_many_keys_and_updates_survive_restart(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    constexpr std::size_t key_count = 256;
+    {
+        minikv::MiniKV store(log_path);
+        for (std::size_t index = 0; index < key_count; ++index) {
+            store.put("key:" + std::to_string(index),
+                      "value:" + std::to_string(index));
+        }
+        for (std::size_t index = 0; index < key_count; index += 7) {
+            store.put("key:" + std::to_string(index),
+                      "updated:" + std::to_string(index));
+        }
+    }
+
+    minikv::MiniKV reopened(log_path);
+    tests.expect(reopened.size() == key_count,
+                 "recovery rebuilds all unique keys");
+    for (std::size_t index = 0; index < key_count; ++index) {
+        const auto expected = index % 7 == 0
+                                  ? "updated:" + std::to_string(index)
+                                  : "value:" + std::to_string(index);
+        tests.expect(reopened.get("key:" + std::to_string(index)) ==
+                         std::optional<std::string>{expected},
+                     "many-key recovery returns the newest value");
+    }
+}
+
+void test_empty_and_nonexistent_databases(
+    TestRunner& tests,
+    const std::filesystem::path& directory) {
+    const auto nonexistent = directory / "nonexistent.minikv";
+    tests.expect(!std::filesystem::exists(nonexistent),
+                 "nonexistent database starts absent");
+    {
+        minikv::MiniKV store(nonexistent);
+        tests.expect(store.empty(),
+                     "a nonexistent database opens as an empty store");
+    }
+    tests.expect(std::filesystem::exists(nonexistent),
+                 "opening a nonexistent database creates its log");
+
+    const auto empty = directory / "empty.minikv";
+    minikv::test::write_file(empty, {});
+    minikv::MiniKV store(empty);
+    tests.expect(store.empty(), "an existing empty database recovers cleanly");
+}
+
+void test_empty_and_binary_values_survive_restart(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    const std::string binary_key{"key\0tail", 8};
+    const std::string binary_value{"left\0right", 10};
+    {
+        minikv::MiniKV store(log_path);
+        store.put("", "empty key");
+        store.put("empty value", "");
+        store.put(binary_key, binary_value);
+    }
+
+    minikv::MiniKV reopened(log_path);
+    tests.expect(reopened.get("") ==
+                     std::optional<std::string>{"empty key"},
+                 "an empty key survives restart");
+    tests.expect(reopened.get("empty value") ==
+                     std::optional<std::string>{""},
+                 "an empty value survives restart");
+    tests.expect(reopened.get(binary_key) ==
+                     std::optional<std::string>{binary_value},
+                 "binary key and value bytes survive restart");
+}
+
+void test_in_memory_delete_is_not_recovered(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    {
+        minikv::MiniKV store(log_path);
+        store.put("temporary", "returns after restart");
+        tests.expect(store.erase("temporary"),
+                     "Stage 3 delete removes the in-memory index entry");
+        tests.expect(!store.get("temporary").has_value(),
+                     "deleted key is absent before restart");
+    }
+
+    minikv::MiniKV reopened(log_path);
+    tests.expect(reopened.get("temporary") ==
+                     std::optional<std::string>{"returns after restart"},
+                 "nonpersistent delete reappears during PUT-only recovery");
+}
+
+void test_corruption_fails_recovery(
+    TestRunner& tests,
+    const std::filesystem::path& directory) {
+    auto invalid_magic = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "key", "value"});
+    invalid_magic[0] = 'X';
+    const auto invalid_magic_path = directory / "invalid-magic.minikv";
+    minikv::test::write_file(invalid_magic_path, invalid_magic);
+    tests.expect_throws<minikv::detail::RecordError>(
+        [&] { minikv::MiniKV store(invalid_magic_path); },
+        "recovery rejects corrupted record magic");
+
+    auto valid = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "first", "one"});
+    auto truncated = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "second", "two"});
+    truncated.pop_back();
+    valid.insert(valid.end(), truncated.begin(), truncated.end());
+    const auto truncated_path = directory / "truncated-tail.minikv";
+    minikv::test::write_file(truncated_path, valid);
+    tests.expect_throws<minikv::detail::RecordError>(
+        [&] { minikv::MiniKV store(truncated_path); },
+        "recovery rejects a truncated tail after valid records");
+}
+
 }  // namespace
 
 int main() {
@@ -181,6 +317,16 @@ int main() {
         tests, temporary_directory.path() / "mutations.minikv");
     test_rejected_put_does_not_change_state(
         tests, temporary_directory.path() / "rejected.minikv");
+    test_restart_and_newest_record_wins(
+        tests, temporary_directory.path() / "restart.minikv");
+    test_many_keys_and_updates_survive_restart(
+        tests, temporary_directory.path() / "many-keys.minikv");
+    test_empty_and_nonexistent_databases(tests, temporary_directory.path());
+    test_empty_and_binary_values_survive_restart(
+        tests, temporary_directory.path() / "binary-restart.minikv");
+    test_in_memory_delete_is_not_recovered(
+        tests, temporary_directory.path() / "delete-restart.minikv");
+    test_corruption_fails_recovery(tests, temporary_directory.path());
 
     return tests.finish();
 }

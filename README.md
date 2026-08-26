@@ -4,18 +4,17 @@ MiniKV is a small persistent key-value storage engine written in modern C++.
 Its purpose is to make the mechanics below a database API understandable:
 persistence, indexing, recovery, concurrency, compaction, and performance.
 
-The project currently writes `PUT` operations to a versioned binary append-only
-log, then updates an in-memory hash table. `DELETE` remains in-memory only until
-Stage 4. The log survives normal process exit, but restart recovery is
-intentionally not implemented yet: a newly opened `MiniKV` does not replay
-existing records.
+The project writes `PUT` operations to a versioned binary append-only log, then
+updates an in-memory hash index from each key to its newest record location.
+Opening a database scans and validates the log to rebuild that index, so PUTs
+survive restart. `DELETE` remains in-memory only until Stage 4.
 
 ## Design direction
 
 ```text
 Client
   -> MiniKV API
-  -> in-memory index
+  -> in-memory key-to-record-location index
   -> append-only storage log
   -> disk
 ```
@@ -48,14 +47,16 @@ const bool removed = store.erase("course");
 ```
 
 `put` inserts or overwrites, `get` returns `std::nullopt` for a missing key, and
-`erase` reports whether it removed an existing key, but does not write to disk in
-Stage 2. PUT records are appended before memory changes. Empty strings and
-embedded NUL bytes are valid in both keys and values, within the documented size
-limits.
+`erase` reports whether it removed an existing key, but does not write to disk
+through Stage 3. Consequently, an erased key reappears after restart if an older
+PUT exists for it. PUT records are appended before the index changes. Empty
+strings and embedded NUL bytes are valid in both keys and values, within the
+documented size limits.
 
 See [the version 1 file format](docs/file-format.md) for the byte layout and
-validation rules. This stage flushes the C++ file stream after each record but
-does not yet promise power-loss durability or recover state after restart.
+validation rules. Startup rejects malformed or truncated content instead of
+silently skipping it. This stage flushes the C++ file stream after each record
+but does not yet promise power-loss durability.
 
 ## Build and run
 

@@ -91,7 +91,7 @@ EncodedRecord encode_record(const Record& record) {
     return output;
 }
 
-DecodedRecord decode_record(std::span<const char> input) {
+DecodedRecordHeader decode_record_header(std::span<const char> input) {
     if (input.size() < record_header_size) {
         throw RecordError("record header is truncated");
     }
@@ -125,15 +125,22 @@ DecodedRecord decode_record(std::span<const char> input) {
     const auto payload_size = static_cast<std::size_t>(key_length) +
                               static_cast<std::size_t>(value_length);
     const auto encoded_size = record_header_size + payload_size;
-    if (input.size() < encoded_size) {
+    return DecodedRecordHeader{
+        operation, key_length, value_length, encoded_size};
+}
+
+DecodedRecord decode_record(std::span<const char> input) {
+    const auto header = decode_record_header(input);
+    if (input.size() < header.encoded_size) {
         throw RecordError("record payload is truncated");
     }
 
-    std::string key(input.data() + record_header_size, key_length);
-    std::string value(input.data() + record_header_size + key_length,
-                      value_length);
+    std::string key(input.data() + record_header_size, header.key_length);
+    std::string value(input.data() + record_header_size + header.key_length,
+                      header.value_length);
     return DecodedRecord{
-        Record{operation, std::move(key), std::move(value)}, encoded_size};
+        Record{header.operation, std::move(key), std::move(value)},
+        header.encoded_size};
 }
 
 }  // namespace minikv::detail

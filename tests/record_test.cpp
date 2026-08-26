@@ -49,6 +49,16 @@ void test_exact_version_one_layout(TestRunner& tests) {
 
     tests.expect(encoded == expected,
                  "version 1 encoding matches the documented byte layout");
+
+    const auto header = minikv::detail::decode_record_header(as_span(encoded));
+    tests.expect(header.operation == Operation::Put,
+                 "header decoder returns the PUT operation");
+    tests.expect(header.key_length == 1,
+                 "header decoder returns the key length");
+    tests.expect(header.value_length == 1,
+                 "header decoder returns the value length");
+    tests.expect(header.encoded_size == encoded.size(),
+                 "header decoder computes the complete record size");
 }
 
 void test_round_trip(TestRunner& tests) {

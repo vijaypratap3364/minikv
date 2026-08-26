@@ -33,12 +33,21 @@ struct DecodedRecord {
     std::size_t bytes_consumed;
 };
 
+struct DecodedRecordHeader {
+    Operation operation;
+    std::uint32_t key_length;
+    std::uint32_t value_length;
+    std::size_t encoded_size;
+};
+
 class RecordError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
 [[nodiscard]] EncodedRecord encode_record(const Record& record);
+[[nodiscard]] DecodedRecordHeader decode_record_header(
+    std::span<const char> input);
 [[nodiscard]] DecodedRecord decode_record(std::span<const char> input);
 
 }  // namespace minikv::detail

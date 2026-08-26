@@ -10,7 +10,7 @@ its own magic and version so a decoder validates the boundary it was given.
 | ---: | ---: | --- | --- |
 | 0 | 4 bytes | Magic | ASCII bytes `MKVR` |
 | 4 | 1 byte | Format version | `0x01` |
-| 5 | 1 byte | Operation | `0x01` PUT; all other values are invalid in Stage 2 |
+| 5 | 1 byte | Operation | `0x01` PUT; all other values are invalid through Stage 3 |
 | 6 | 2 bytes | Reserved | Both bytes must be zero |
 | 8 | 4 bytes | Key length | Unsigned 32-bit little-endian byte count |
 | 12 | 4 bytes | Value length | Unsigned 32-bit little-endian byte count |
@@ -22,8 +22,8 @@ appears first. Magic, version, and operation fields do not have an endianness.
 The fixed header is 16 bytes.
 
 The operation byte is retained as a structural part of the format, but version 1
-Stage 2 recognizes only PUT. Persistent DELETE and its tombstone encoding are
-deferred until Stage 4. Empty PUT keys and values are valid.
+through Stage 3 recognizes only PUT. Persistent DELETE and its tombstone
+encoding are deferred until Stage 4. Empty PUT keys and values are valid.
 
 ## Limits
 
@@ -67,6 +67,8 @@ after each record. This makes append errors observable before MiniKV changes its
 in-memory map, but it is not an operating-system sync barrier and therefore is
 not yet a power-loss durability guarantee.
 
-Version 1 has no checksum. The decoder rejects truncated input, but the engine
-does not yet scan, recover, or repair a log on startup. Checksums, torn-tail
-handling, explicit sync policy, and restart replay are later milestones.
+Version 1 has no checksum. On startup, the engine scans from offset zero and
+strictly validates every record while rebuilding its in-memory index. Malformed
+or truncated input aborts opening with an error; Stage 3 does not ignore or
+repair a torn tail. Checksums, torn-tail handling, and an explicit sync policy
+are later milestones.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -33,7 +34,7 @@ public:
     // Returns a copy of the value, or std::nullopt when the key is absent.
     [[nodiscard]] std::optional<Value> get(const Key& key) const;
 
-    // Removes only in-memory state during Stage 2. Persistent deletion is
+    // Removes only in-memory state through Stage 3. Persistent deletion is
     // intentionally deferred until Stage 4.
     [[nodiscard]] bool erase(const Key& key);
 
@@ -42,8 +43,15 @@ public:
     [[nodiscard]] bool empty() const noexcept;
 
 private:
+    struct IndexEntry {
+        std::uint64_t offset;
+        std::uint64_t record_size;
+    };
+
+    void recover();
+
     std::unique_ptr<detail::StorageLog> storage_log_;
-    std::unordered_map<Key, Value> entries_;
+    std::unordered_map<Key, IndexEntry> index_;
 };
 
 }  // namespace minikv

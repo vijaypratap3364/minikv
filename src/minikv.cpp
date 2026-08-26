@@ -3,6 +3,7 @@
 #include "record.hpp"
 #include "storage_log.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <utility>
@@ -11,7 +12,9 @@ namespace minikv {
 
 MiniKV::MiniKV(std::filesystem::path log_path)
     : storage_log_(
-          std::make_unique<detail::StorageLog>(std::move(log_path))) {}
+          std::make_unique<detail::StorageLog>(std::move(log_path))) {
+    recover();
+}
 
 MiniKV::~MiniKV() = default;
 MiniKV::MiniKV(MiniKV&&) noexcept = default;
@@ -20,33 +23,51 @@ MiniKV& MiniKV::operator=(MiniKV&&) noexcept = default;
 void MiniKV::put(Key key, Value value) {
     detail::Record record{
         detail::Operation::Put, std::move(key), std::move(value)};
-    static_cast<void>(storage_log_->append(record));
-    entries_.insert_or_assign(std::move(record.key), std::move(record.value));
+    const auto location = storage_log_->append(record);
+    index_.insert_or_assign(
+        std::move(record.key), IndexEntry{location.offset, location.size});
 }
 
 std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
-    const auto entry = entries_.find(key);
-    if (entry == entries_.end()) {
+    const auto entry = index_.find(key);
+    if (entry == index_.end()) {
         return std::nullopt;
     }
 
-    return entry->second;
+    auto record = storage_log_->read(detail::AppendResult{
+        entry->second.offset, entry->second.record_size});
+    if (record.operation != detail::Operation::Put || record.key != key) {
+        throw detail::StorageError(
+            "in-memory index points to an unexpected record");
+    }
+    return std::move(record.value);
 }
 
 bool MiniKV::erase(const Key& key) {
-    return entries_.erase(key) != 0;
+    return index_.erase(key) != 0;
 }
 
 bool MiniKV::contains(const Key& key) const {
-    return entries_.contains(key);
+    return index_.contains(key);
 }
 
 std::size_t MiniKV::size() const noexcept {
-    return entries_.size();
+    return index_.size();
 }
 
 bool MiniKV::empty() const noexcept {
-    return entries_.empty();
+    return index_.empty();
+}
+
+void MiniKV::recover() {
+    std::uint64_t offset = 0;
+    while (offset < storage_log_->size()) {
+        auto located = storage_log_->read_at(offset);
+        index_.insert_or_assign(
+            std::move(located.record.key),
+            IndexEntry{located.location.offset, located.location.size});
+        offset += located.location.size;
+    }
 }
 
 }  // namespace minikv

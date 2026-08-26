@@ -148,3 +148,59 @@ works, an in-memory DELETE would otherwise be forgotten and an older PUT could
 reappear. Stage 4 will solve that new problem by recording deletion as a
 tombstone. Checksums, torn-write policy, and explicit power-loss durability also
 remain follow-on problems.
+
+## Persistent index: rebuilding locations after restart
+
+### 1. What problem existed?
+
+Stage 2 left valid PUT records on disk, but a newly constructed `MiniKV` did not
+read them. Its fresh in-memory map was empty, so persisted bytes could not be
+found through the API after closing and reopening the database.
+
+### 2. What did we build?
+
+We changed the hash index from key-to-value into key-to-record-location. A
+location contains the record's zero-based file offset and encoded byte size.
+Startup now scans the entire log in order, validates every record, and rebuilds
+that index. `GET` looks up the location and reads the corresponding record from
+disk. `PUT` still appends to disk first and changes the index only after the
+append succeeds.
+
+### 3. How does it solve the problem?
+
+The log is now the persistent source from which a new process reconstructs its
+fast lookup structure. The index lives in memory because hash lookup is fast and
+because its contents are derived from the log, so no separate index file needs
+to be kept consistent yet. Keeping only keys and small locations in the index
+also avoids permanently retaining every value in RAM.
+
+### 4. What happens internally?
+
+Recovery begins at offset zero. It reads and validates one 16-byte header,
+computes the bounded record size, reads exactly that record's remaining bytes,
+and advances by the decoded size. Each key is assigned the location of the
+record just read. If the key appeared earlier, this later assignment replaces
+the old location, so the newest PUT wins. `GET` uses the indexed offset to seek
+to the record, validates it again, and returns its value.
+
+The index makes finding a location expected constant time on average, followed
+by one file seek and one record read. Rebuilding it is linear in the number and
+total encoded size of records.
+
+### 5. What can still go wrong?
+
+Stage 3 treats malformed, unsupported, or truncated content as a startup error;
+it does not silently discard corruption or repair an incomplete tail. Records
+still have no checksum, stream flush is not a power-loss sync guarantee, and
+concurrent access is unsupported. DELETE only removes the current in-memory
+index entry. Since it writes nothing to the log, recovery will make an erased
+key reappear if a prior PUT exists.
+
+### 6. What new problem does this design introduce?
+
+Appending a new PUT changes only the index location; the older record remains on
+disk. Repeated updates therefore make the file grow even when the number of live
+keys stays constant. A later compaction stage must reclaim obsolete versions,
+but Stage 3 deliberately does not implement it. Before that, Stage 4 will make
+deletion persistent by appending tombstone records and replaying them during
+recovery, while also hardening corruption and durability behavior.
