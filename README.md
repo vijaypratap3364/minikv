@@ -81,6 +81,20 @@ ctest --test-dir build --output-on-failure
 For a multi-configuration generator such as Visual Studio, add
 `--config Debug` to the build and test commands.
 
+ThreadSanitizer is prepared for supported GCC/Clang Linux builds and runs in its
+own CI workflow:
+
+```bash
+cmake -S . -B build-tsan \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMINIKV_ENABLE_TSAN=ON
+cmake --build build-tsan --parallel 2
+ctest --test-dir build-tsan --output-on-failure
+```
+
+The sanitizer option intentionally rejects Windows and unsupported compilers.
+It is off by default, so normal local builds do not pay the instrumentation cost.
+
 Run the linked append-only demo from the generator-specific output directory:
 
 ```powershell

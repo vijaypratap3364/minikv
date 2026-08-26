@@ -9,6 +9,22 @@ project(
 
 find_package(Threads REQUIRED)
 
+option(
+    MINIKV_ENABLE_TSAN
+    "Instrument MiniKV and its tests with ThreadSanitizer"
+    OFF
+)
+if(MINIKV_ENABLE_TSAN)
+    if(WIN32 OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(
+            FATAL_ERROR
+            "MINIKV_ENABLE_TSAN requires GCC or Clang on a non-Windows host"
+        )
+    endif()
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
+
 function(minikv_enable_warnings target_name)
     if(MSVC)
         target_compile_options(${target_name} PRIVATE /W4 /permissive-)

@@ -1,0 +1,39 @@
+name: ThreadSanitizer
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  thread-sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang
+
+      - name: Configure ThreadSanitizer build
+        run: >-
+          cmake -S . -B build-tsan
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=clang++
+          -DMINIKV_ENABLE_TSAN=ON
+
+      - name: Build with compiler warnings
+        run: cmake --build build-tsan --parallel 2
+
+      - name: Run complete test suite under ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-tsan --output-on-failure

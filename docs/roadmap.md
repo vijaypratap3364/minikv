@@ -59,6 +59,7 @@ by the next one.
 - Protect one engine instance with a coarse standard-library mutex.
 - Keep append, optional sync, and index mutation in one write critical section.
 - Test concurrent reads, writes, deletes, contention, and restart recovery.
+- Run the suite under ThreadSanitizer in supported Linux CI builds.
 - Document the choice to defer finer-grained shared locking until storage reads
   have an appropriate parallel-I/O design.
 
