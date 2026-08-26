@@ -11,6 +11,7 @@
 namespace {
 
 using minikv::detail::AppendResult;
+using minikv::detail::ChecksumMismatchError;
 using minikv::detail::Operation;
 using minikv::detail::Record;
 using minikv::detail::RecordError;
@@ -24,6 +25,7 @@ void test_append_and_offsets(TestRunner& tests,
     const std::vector<Record> expected{
         {Operation::Put, "first", "one"},
         {Operation::Put, "second", "two"},
+        {Operation::Delete, "first", {}},
         {Operation::Put, "third", "three"},
     };
     std::vector<AppendResult> locations;
@@ -88,7 +90,7 @@ void test_records_can_be_read_by_location(
     const std::filesystem::path& log_path) {
     StorageLog log(log_path);
     const Record first{Operation::Put, "first", "one"};
-    const Record second{Operation::Put, "second", "two"};
+    const Record second{Operation::Delete, "first", {}};
     const auto first_location = log.append(first);
     const auto second_location = log.append(second);
 
@@ -103,6 +105,20 @@ void test_records_can_be_read_by_location(
                  "read validates and returns an indexed record");
     tests.expect(log.size() == first_location.size + second_location.size,
                  "storage log exposes its current byte size");
+}
+
+void test_corruption_is_detected_on_read(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    auto encoded = minikv::detail::encode_record(
+        Record{Operation::Put, "key", "value"});
+    encoded[minikv::detail::record_header_size] ^= 0x01;
+    minikv::test::write_file(log_path, encoded);
+
+    StorageLog log(log_path);
+    tests.expect_throws<ChecksumMismatchError>(
+        [&] { static_cast<void>(log.read_at(0)); },
+        "storage reads verify the record checksum");
 }
 
 void test_errors_do_not_create_logical_records(
@@ -140,6 +156,8 @@ int main() {
         tests, temporary_directory.path() / "reopen.minikv");
     test_records_can_be_read_by_location(
         tests, temporary_directory.path() / "read.minikv");
+    test_corruption_is_detected_on_read(
+        tests, temporary_directory.path() / "corrupt.minikv");
     test_errors_do_not_create_logical_records(tests,
                                               temporary_directory.path());
 

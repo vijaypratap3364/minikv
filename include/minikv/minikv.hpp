@@ -34,8 +34,8 @@ public:
     // Returns a copy of the value, or std::nullopt when the key is absent.
     [[nodiscard]] std::optional<Value> get(const Key& key) const;
 
-    // Removes only in-memory state through Stage 3. Persistent deletion is
-    // intentionally deferred until Stage 4.
+    // Appends a tombstone before removing an existing key from the index.
+    // Returns false without writing when the key is already absent.
     [[nodiscard]] bool erase(const Key& key);
 
     [[nodiscard]] bool contains(const Key& key) const;

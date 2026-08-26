@@ -2,10 +2,10 @@
 
 ## Current implementation
 
-MiniKV records PUTs in a versioned append-only file and keeps an in-memory hash
-index from each live key to its newest record's offset and encoded size. Values
-remain in the log and are read from disk on demand. DELETE remains an in-memory
-operation through Stage 3.
+MiniKV records PUTs and DELETE tombstones in a checksummed, versioned append-only
+file. Its in-memory hash index maps each live key to its newest PUT record's
+offset and encoded size. Values remain in the log and are read from disk on
+demand.
 
 ```text
 Client PUT
@@ -15,6 +15,12 @@ Client PUT
   -> disk file
   -> in-memory key-to-record-location update
 
+Client DELETE for an existing key
+  -> Record encoder creates a tombstone
+  -> StorageLog append + stream flush
+  -> disk file
+  -> remove key from the in-memory index
+
 Client GET
   -> in-memory index lookup
   -> StorageLog read at indexed offset
@@ -23,24 +29,26 @@ Client GET
 
 Startup
   -> scan records from offset zero
-  -> validate and decode each complete record
-  -> assign its location to that key in the index
+  -> validate format, length, and CRC-32 of each record
+  -> PUT assigns its location to the key
+  -> DELETE removes the key
 
-Client CONTAINS/DELETE
+Client CONTAINS
   -> in-memory index
 ```
 
 The three responsibilities are deliberately separate. `MiniKV` defines logical
 behavior, the record codec defines bytes, and `StorageLog` owns file I/O and the
 next append offset. See [the file-format specification](file-format.md) for the
-stable version 1 layout.
+stable version 2 layout.
 
 Each `MiniKV` is constructed with a log path. Opening creates the file if needed,
 discovers its current size, and scans records sequentially from offset zero.
-Assigning each decoded key's location replaces any earlier location, so the
-newest record for that key wins. Empty and nonexistent database files recover as
-empty databases. Malformed, unsupported, or truncated content raises an error;
-Stage 3 does not silently ignore or repair corruption.
+Applying records in order makes the newest operation for a key win. A later PUT
+replaces an earlier location, while a later DELETE removes it. Empty and
+nonexistent database files recover as empty databases. Invalid format, checksum
+mismatch, and incomplete content raise distinct record errors; Stage 4 does not
+silently ignore or repair corruption.
 
 ## API semantics
 
@@ -48,7 +56,7 @@ Stage 3 does not silently ignore or repair corruption.
 | --- | --- | --- |
 | PUT | `put(key, value)` | Appends a PUT, then inserts or overwrites its index location. |
 | GET | `get(key)` | Uses the index to read the newest record and returns a copied value, or `std::nullopt` when missing. |
-| DELETE | `erase(key)` | Removes an in-memory index entry and reports whether it existed. It does not append through Stage 3. |
+| DELETE | `erase(key)` | For an existing key, appends a tombstone and then removes the index entry. A missing key returns `false` without writing. |
 | CONTAINS | `contains(key)` | Reports whether a key currently exists. |
 
 Empty keys and values are valid. A present empty value is distinguishable from a
@@ -56,9 +64,9 @@ missing key because only the latter returns `std::nullopt`. Keys and values may
 contain arbitrary bytes, including NUL. This stage provides no synchronization;
 concurrent access to the same instance is not supported.
 
-If PUT record encoding or append/flush fails, the exception reaches the caller
-and the in-memory index is not changed. A partial failed write may still leave a
-torn tail on disk; the next startup reports that truncation as corruption rather
+If PUT or DELETE encoding or append/flush fails, the exception reaches the
+caller and the in-memory index is not changed. A partial failed write may still
+leave a torn tail on disk; the next startup reports an incomplete record rather
 than repairing it.
 
 The hash table gives expected average constant-time index lookup, insertion, and
@@ -75,7 +83,7 @@ The current data flow is:
 Client
   -> MiniKV API (PUT, GET, DELETE)
   -> in-memory index (key to latest record location)
-  -> append-only storage log (PUT records now, tombstones in Stage 4)
+  -> append-only storage log (PUT records and DELETE tombstones)
   -> disk
 ```
 
@@ -83,9 +91,11 @@ The API defines observable behavior, the index avoids scanning the whole log for
 each read, and the log is the source used to rebuild locations after restart.
 The append-only design deliberately leaves old versions on disk; they are no
 longer indexed when superseded, but they make the file grow until a later
-compaction stage rewrites only live data. DELETE is not persistent yet, so an
-older PUT for an erased key reappears after restart. Stream flush is also not a
-power-loss durability guarantee; explicit OS sync policy comes later.
+compaction stage rewrites only live data. Tombstones also remain because the log
+is never rewritten in place. Every version 2 record carries a CRC-32 that detects
+many accidental byte changes, but it neither repairs data nor authenticates it
+against deliberate modification. Stream flush is also not a power-loss
+durability guarantee; explicit OS sync policy comes later.
 
 ## Boundaries
 

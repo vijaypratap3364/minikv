@@ -36,12 +36,14 @@ by the next one.
 - Reject malformed or truncated input explicitly during startup.
 - Keep old record versions on disk and defer compaction.
 
-## Stage 4 — persistent deletion and recovery hardening
+## Stage 4 — persistent deletion and record integrity (complete)
 
 - Add DELETE tombstone records and replay them during recovery.
-- Add checksums and record validation.
-- Detect and ignore an incomplete tail record after a torn write.
-- Define flush/sync behavior and make durability guarantees explicit.
+- Add CRC-32 checksums and verify them on every decoded record.
+- Distinguish invalid format, checksum mismatch, and incomplete records.
+- Reject an incomplete tail explicitly; automatic repair remains future work.
+- Keep the current stream-flush behavior explicit without claiming power-loss
+  durability.
 
 ## Stage 5 — multithreaded access
 

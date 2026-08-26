@@ -54,15 +54,18 @@ void test_missing_and_delete(TestRunner& tests,
     const auto log_size_before_delete = std::filesystem::file_size(log_path);
     tests.expect(store.erase("temporary"),
                  "erase returns true for an existing key");
-    tests.expect(std::filesystem::file_size(log_path) == log_size_before_delete,
-                 "erasing an existing key remains in-memory only");
+    tests.expect(std::filesystem::file_size(log_path) > log_size_before_delete,
+                 "erasing an existing key appends a tombstone");
     tests.expect(!store.contains("temporary"),
                  "an erased key is no longer contained");
     tests.expect(!store.get("temporary").has_value(),
                  "get cannot read an erased key");
     tests.expect(store.empty(), "erasing the only key empties the store");
+    const auto log_size_after_delete = std::filesystem::file_size(log_path);
     tests.expect(!store.erase("temporary"),
                  "erasing the same key twice returns false");
+    tests.expect(std::filesystem::file_size(log_path) == log_size_after_delete,
+                 "repeated deletion does not append another tombstone");
 }
 
 void test_empty_and_binary_data(TestRunner& tests,
@@ -112,16 +115,16 @@ void test_independent_instances(TestRunner& tests,
                  "erasing from one instance does not affect another");
 }
 
-void test_only_puts_are_appended(TestRunner& tests,
-                                const std::filesystem::path& log_path) {
+void test_mutations_are_appended(TestRunner& tests,
+                                 const std::filesystem::path& log_path) {
     {
         minikv::MiniKV store(log_path);
         store.put("name", "Vijay");
         store.put("name", "MiniKV");
         tests.expect(store.erase("name"),
-                     "in-memory delete succeeds after persistent puts");
+                     "persistent delete succeeds after puts");
         tests.expect(!store.contains("name"),
-                     "in-memory delete removes the current value");
+                     "delete removes the current value");
     }
 
     const auto bytes = minikv::test::read_file(log_path);
@@ -144,8 +147,16 @@ void test_only_puts_are_appended(TestRunner& tests,
                                       "MiniKV"},
                  "overwrite appends another put record");
 
+    const auto third = minikv::detail::decode_record(input.subspan(offset));
+    offset += third.bytes_consumed;
+    tests.expect(third.record == minikv::detail::Record{
+                                     minikv::detail::Operation::Delete,
+                                     "name",
+                                     {}},
+                 "delete appends a tombstone record");
+
     tests.expect(offset == bytes.size(),
-                 "delete appends no third record during Stage 2");
+                 "the log contains exactly the three mutations");
 }
 
 void test_rejected_put_does_not_change_state(
@@ -255,22 +266,46 @@ void test_empty_and_binary_values_survive_restart(
                  "binary key and value bytes survive restart");
 }
 
-void test_in_memory_delete_is_not_recovered(
+void test_persistent_delete_survives_restart(
     TestRunner& tests,
     const std::filesystem::path& log_path) {
     {
         minikv::MiniKV store(log_path);
-        store.put("temporary", "returns after restart");
+        store.put("temporary", "old value");
+        store.put("temporary", "new value");
         tests.expect(store.erase("temporary"),
-                     "Stage 3 delete removes the in-memory index entry");
+                     "delete removes the updated key");
         tests.expect(!store.get("temporary").has_value(),
                      "deleted key is absent before restart");
     }
 
     minikv::MiniKV reopened(log_path);
-    tests.expect(reopened.get("temporary") ==
-                     std::optional<std::string>{"returns after restart"},
-                 "nonpersistent delete reappears during PUT-only recovery");
+    tests.expect(!reopened.get("temporary").has_value(),
+                 "tombstone keeps an updated key deleted after restart");
+    tests.expect(!reopened.contains("temporary"),
+                 "recovery does not index a tombstoned key");
+    tests.expect(reopened.empty(),
+                 "recovery excludes deleted keys from the store size");
+}
+
+void test_delete_then_reinsert(
+    TestRunner& tests,
+    const std::filesystem::path& log_path) {
+    {
+        minikv::MiniKV store(log_path);
+        store.put("A", "1");
+        tests.expect(store.erase("A"),
+                     "a key can be deleted before reinsertion");
+        store.put("A", "2");
+        tests.expect(store.get("A") == std::optional<std::string>{"2"},
+                     "a re-PUT after delete is visible immediately");
+    }
+
+    minikv::MiniKV reopened(log_path);
+    tests.expect(reopened.get("A") == std::optional<std::string>{"2"},
+                 "a re-PUT after tombstone survives restart");
+    tests.expect(reopened.size() == 1,
+                 "reinsertion rebuilds one live index entry");
 }
 
 void test_corruption_fails_recovery(
@@ -281,9 +316,18 @@ void test_corruption_fails_recovery(
     invalid_magic[0] = 'X';
     const auto invalid_magic_path = directory / "invalid-magic.minikv";
     minikv::test::write_file(invalid_magic_path, invalid_magic);
-    tests.expect_throws<minikv::detail::RecordError>(
+    tests.expect_throws<minikv::detail::InvalidRecordError>(
         [&] { minikv::MiniKV store(invalid_magic_path); },
-        "recovery rejects corrupted record magic");
+        "recovery distinguishes invalid record format");
+
+    auto checksum_mismatch = minikv::detail::encode_record(
+        minikv::detail::Record{minikv::detail::Operation::Put, "key", "value"});
+    checksum_mismatch[minikv::detail::record_header_size] ^= 0x01;
+    const auto checksum_path = directory / "checksum-mismatch.minikv";
+    minikv::test::write_file(checksum_path, checksum_mismatch);
+    tests.expect_throws<minikv::detail::ChecksumMismatchError>(
+        [&] { minikv::MiniKV store(checksum_path); },
+        "recovery distinguishes a checksum mismatch");
 
     auto valid = minikv::detail::encode_record(
         minikv::detail::Record{minikv::detail::Operation::Put, "first", "one"});
@@ -293,9 +337,9 @@ void test_corruption_fails_recovery(
     valid.insert(valid.end(), truncated.begin(), truncated.end());
     const auto truncated_path = directory / "truncated-tail.minikv";
     minikv::test::write_file(truncated_path, valid);
-    tests.expect_throws<minikv::detail::RecordError>(
+    tests.expect_throws<minikv::detail::IncompleteRecordError>(
         [&] { minikv::MiniKV store(truncated_path); },
-        "recovery rejects a truncated tail after valid records");
+        "recovery distinguishes an incomplete tail record");
 }
 
 }  // namespace
@@ -313,7 +357,7 @@ int main() {
     test_empty_and_binary_data(
         tests, temporary_directory.path() / "binary.minikv");
     test_independent_instances(tests, temporary_directory.path());
-    test_only_puts_are_appended(
+    test_mutations_are_appended(
         tests, temporary_directory.path() / "mutations.minikv");
     test_rejected_put_does_not_change_state(
         tests, temporary_directory.path() / "rejected.minikv");
@@ -324,8 +368,10 @@ int main() {
     test_empty_and_nonexistent_databases(tests, temporary_directory.path());
     test_empty_and_binary_values_survive_restart(
         tests, temporary_directory.path() / "binary-restart.minikv");
-    test_in_memory_delete_is_not_recovered(
+    test_persistent_delete_survives_restart(
         tests, temporary_directory.path() / "delete-restart.minikv");
+    test_delete_then_reinsert(
+        tests, temporary_directory.path() / "delete-reinsert.minikv");
     test_corruption_fails_recovery(tests, temporary_directory.path());
 
     return tests.finish();

@@ -44,7 +44,15 @@ std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
 }
 
 bool MiniKV::erase(const Key& key) {
-    return index_.erase(key) != 0;
+    const auto entry = index_.find(key);
+    if (entry == index_.end()) {
+        return false;
+    }
+
+    const detail::Record tombstone{detail::Operation::Delete, key, {}};
+    static_cast<void>(storage_log_->append(tombstone));
+    index_.erase(entry);
+    return true;
 }
 
 bool MiniKV::contains(const Key& key) const {
@@ -63,9 +71,17 @@ void MiniKV::recover() {
     std::uint64_t offset = 0;
     while (offset < storage_log_->size()) {
         auto located = storage_log_->read_at(offset);
-        index_.insert_or_assign(
-            std::move(located.record.key),
-            IndexEntry{located.location.offset, located.location.size});
+        switch (located.record.operation) {
+            case detail::Operation::Put:
+                index_.insert_or_assign(
+                    std::move(located.record.key),
+                    IndexEntry{located.location.offset,
+                               located.location.size});
+                break;
+            case detail::Operation::Delete:
+                index_.erase(located.record.key);
+                break;
+        }
         offset += located.location.size;
     }
 }

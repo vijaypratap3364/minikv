@@ -204,3 +204,65 @@ keys stays constant. A later compaction stage must reclaim obsolete versions,
 but Stage 3 deliberately does not implement it. Before that, Stage 4 will make
 deletion persistent by appending tombstone records and replaying them during
 recovery, while also hardening corruption and durability behavior.
+
+## Tombstones and checksums: persistent absence with integrity checks
+
+### 1. What problem existed?
+
+Deleting a key only from the in-memory index worked until the database was
+closed. The log still contained the key's older PUT, so startup recovery would
+replay that record and make the deleted value reappear. The format also had no
+way to detect a byte that changed while stored or copied.
+
+### 2. What did we build?
+
+We added DELETE records called tombstones and evolved the record format to
+version 2. A tombstone stores the DELETE operation and key with no value. Every
+version 2 PUT and DELETE also ends with a standard CRC-32/ISO-HDLC checksum.
+Invalid format, incomplete input, and checksum mismatch have distinct error
+types; a missing key remains normal API state represented by `std::nullopt`.
+
+### 3. How does it solve the problem?
+
+For an existing key, `erase` appends and flushes a tombstone before removing the
+key from memory. If the append fails, the index still describes the last
+persisted state. During recovery, a PUT assigns its location in the index and a
+later tombstone removes it. Another PUT after that tombstone assigns a new
+location, so delete followed by reinsertion behaves naturally.
+
+The checksum summarizes the exact encoded header, key, and value bytes. A read
+recomputes that summary and reports a mismatch when the stored result differs,
+detecting many accidental bit flips and burst errors that structural validation
+alone would miss.
+
+### 4. What happens internally?
+
+The recovery scan still moves from offset zero toward the end of the log. Each
+version 2 header tells it the bounded record length. The decoder requires the
+entire payload and four checksum bytes, validates the record shape, and verifies
+CRC-32 before returning the operation. The scan applies operations in order, so
+the newest PUT or DELETE determines whether the key is live.
+
+Deleting a missing key returns `false` and appends nothing. Repeated deletion
+therefore does not grow the log with redundant tombstones. Empty and binary-safe
+keys remain valid, and a tombstone's value length must always be zero.
+
+### 5. What can still go wrong?
+
+CRC-32 is an error-detection code, not encryption, authentication, or a digital
+signature. Someone who deliberately changes a record can calculate a matching
+checksum. CRC-32 cannot repair damage, recover lost bytes, or prove which of two
+different records is correct. It also does not guarantee that a stream flush
+survived power loss.
+
+MiniKV still rejects an incomplete tail instead of automatically truncating or
+repairing it. It has no concurrent-access protection, and version 1 logs are
+rejected because they do not carry the checksum required by version 2.
+
+### 6. What new problem does this design introduce?
+
+A tombstone makes absence durable, but it does not remove the older PUT bytes.
+Updates and deletes therefore leave obsolete records behind and the file keeps
+growing. Compaction must eventually rewrite only the state that still matters.
+Before compaction, later work also needs a precise OS-level sync policy and a
+safe policy for recovering or repairing an incomplete final record.

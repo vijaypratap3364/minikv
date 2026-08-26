@@ -1,56 +1,93 @@
 # MiniKV File Format
 
-This document defines binary record format version 1. A MiniKV log is zero or
+This document defines binary record format version 2. A MiniKV log is zero or
 more records concatenated without a separate file header. Every record carries
-its own magic and version so a decoder validates the boundary it was given.
+its own magic, version, operation, lengths, and checksum so a reader can validate
+the boundary it was given.
 
-## Version 1 record layout
+## Version 2 record layout
 
-| Byte offset | Width | Field | Version 1 rule |
+| Byte offset | Width | Field | Version 2 rule |
 | ---: | ---: | --- | --- |
 | 0 | 4 bytes | Magic | ASCII bytes `MKVR` |
-| 4 | 1 byte | Format version | `0x01` |
-| 5 | 1 byte | Operation | `0x01` PUT; all other values are invalid through Stage 3 |
+| 4 | 1 byte | Format version | `0x02` |
+| 5 | 1 byte | Operation | `0x01` PUT; `0x02` DELETE |
 | 6 | 2 bytes | Reserved | Both bytes must be zero |
 | 8 | 4 bytes | Key length | Unsigned 32-bit little-endian byte count |
 | 12 | 4 bytes | Value length | Unsigned 32-bit little-endian byte count |
 | 16 | Key length | Key | Uninterpreted bytes |
 | 16 + key length | Value length | Value | Uninterpreted bytes |
+| 16 + key length + value length | 4 bytes | Checksum | CRC-32/ISO-HDLC, unsigned little-endian |
 
 All multibyte integers use little-endian byte order: the least significant byte
 appears first. Magic, version, and operation fields do not have an endianness.
-The fixed header is 16 bytes.
+The fixed header is 16 bytes and the trailing checksum is 4 bytes.
 
-The operation byte is retained as a structural part of the format, but version 1
-through Stage 3 recognizes only PUT. Persistent DELETE and its tombstone
-encoding are deferred until Stage 4. Empty PUT keys and values are valid.
+A PUT may have an empty key or value. A DELETE is a tombstone: it contains the
+key being deleted and must have a zero value length. Empty and binary-safe keys
+remain valid for both operations.
+
+## Checksum
+
+Version 2 uses CRC-32/ISO-HDLC, commonly called the standard CRC-32 used by ZIP
+and Ethernet. Its parameters are:
+
+- reflected polynomial `0xEDB88320`
+- initial value `0xFFFFFFFF`
+- reflected byte processing
+- final XOR `0xFFFFFFFF`
+- check value for ASCII `123456789`: `0xCBF43926`
+
+The checksum covers every byte from the `M` in the magic through the final key
+or value byte. It does not include the four checksum bytes themselves. The
+decoder recomputes and compares it before constructing key and value strings.
+
+CRC-32 detects many common accidental changes, including flipped bytes and
+short bursts of corruption. It is not cryptography: an attacker can deliberately
+change data and calculate a matching checksum. It also cannot repair corrupted
+bytes, identify which copy is correct, or prove that flushed data reached stable
+storage before a power loss.
 
 ## Limits
 
 - Maximum key length: 65,536 bytes (64 KiB)
 - Maximum PUT value length: 4,194,304 bytes (4 MiB)
-- Maximum encoded record length: 4,259,856 bytes, including the header
+- DELETE value length: exactly zero bytes
+- Maximum encoded record length: 4,259,860 bytes, including header and checksum
 
-The fields are 32 bits so the format has room to evolve, but version 1 enforces
-smaller operational limits to bound allocation and keep the educational engine
-safe on the constrained development machine.
+The length fields are 32 bits so the format has room to evolve, but version 2
+enforces smaller operational limits to bound allocation and keep the educational
+engine safe on the constrained development machine.
 
 ## Versioning
 
-The decoder accepts only version 1. An incompatible future layout must use a new
-version number and an explicit decoder; unknown versions are rejected rather
-than guessed. The reserved bytes must remain zero in version 1 so future flags
-cannot be silently misinterpreted by an old reader.
+The encoder writes only version 2 and the decoder accepts only version 2.
+Version 1 had the same 16-byte header and PUT payload but no checksum or DELETE
+tombstone. Because version 1 records cannot provide Stage 4's integrity
+guarantee, they are rejected as unsupported rather than guessed or silently
+upgraded. An incompatible future layout must use another version and an explicit
+decoder.
 
-## Validation
+The reserved bytes must remain zero in version 2 so future flags cannot be
+silently misinterpreted by an older reader.
 
-Before constructing key or value strings, the decoder:
+## Validation and errors
+
+Before returning a record, the decoder:
 
 1. Requires the complete 16-byte header.
 2. Verifies magic, version, operation, and zero reserved bytes.
 3. Decodes both lengths explicitly from little-endian bytes.
-4. Rejects lengths above the version 1 limits.
-5. Computes the bounded total record size and requires that many input bytes.
+4. Enforces key/value limits and the zero-length DELETE value rule.
+5. Computes the bounded total record size and requires all payload and checksum
+   bytes.
+6. Recomputes CRC-32 and compares it with the stored checksum.
+
+Invalid magic, version, operation, reserved bytes, lengths, or tombstone shape
+produce an invalid-format error. Missing header, payload, or checksum bytes
+produce an incomplete-record error. A structurally complete record whose CRC-32
+does not match produces a checksum-mismatch error. A missing key is different:
+it is valid database state and `GET` returns `std::nullopt`.
 
 The decoder returns the number of bytes consumed, allowing a caller to advance
 to the next record. Extra bytes after one complete record are not an error
@@ -59,16 +96,14 @@ because they may begin the next record.
 ## Offsets, flushing, and current limits
 
 An offset is a zero-based byte position in the log. The offset returned by an
-append points to the `M` in that record's magic. Offsets let later stages refer
-to records without rewriting or copying earlier bytes.
+append points to the `M` in that record's magic. The in-memory index uses PUT
+offsets to find live values without scanning unrelated records.
 
 The storage log opens files in binary append mode and flushes the C++ stream
-after each record. This makes append errors observable before MiniKV changes its
-in-memory map, but it is not an operating-system sync barrier and therefore is
-not yet a power-loss durability guarantee.
+after each record. Append failure is observable before MiniKV changes its index,
+but a stream flush is not an operating-system sync barrier and is not a
+power-loss durability guarantee.
 
-Version 1 has no checksum. On startup, the engine scans from offset zero and
-strictly validates every record while rebuilding its in-memory index. Malformed
-or truncated input aborts opening with an error; Stage 3 does not ignore or
-repair a torn tail. Checksums, torn-tail handling, and an explicit sync policy
-are later milestones.
+Startup validates every record. Invalid format, checksum mismatch, and an
+incomplete tail all abort opening with a controlled error. Stage 4 does not
+silently ignore or repair corruption.

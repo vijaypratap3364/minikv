@@ -11,9 +11,11 @@ namespace {
 
 using minikv::detail::DecodedRecord;
 using minikv::detail::EncodedRecord;
+using minikv::detail::ChecksumMismatchError;
+using minikv::detail::IncompleteRecordError;
+using minikv::detail::InvalidRecordError;
 using minikv::detail::Operation;
 using minikv::detail::Record;
-using minikv::detail::RecordError;
 using minikv::test::TestRunner;
 
 constexpr std::size_t version_offset = 4;
@@ -36,19 +38,22 @@ void write_u32_little_endian(EncodedRecord& bytes,
     }
 }
 
-void test_exact_version_one_layout(TestRunner& tests) {
+void test_exact_version_two_layout(TestRunner& tests) {
     const auto encoded = minikv::detail::encode_record(
         Record{Operation::Put, "K", "V"});
-    const EncodedRecord expected{
+    EncodedRecord expected{
         'M', 'K', 'V', 'R',
-        '\1', '\1', '\0', '\0',
+        '\2', '\1', '\0', '\0',
         '\1', '\0', '\0', '\0',
         '\1', '\0', '\0', '\0',
         'K', 'V',
     };
+    for (const std::uint8_t checksum_byte : {0xB7U, 0x32U, 0xC5U, 0xF2U}) {
+        expected.push_back(std::bit_cast<char>(checksum_byte));
+    }
 
     tests.expect(encoded == expected,
-                 "version 1 encoding matches the documented byte layout");
+                 "version 2 encoding matches the documented byte layout");
 
     const auto header = minikv::detail::decode_record_header(as_span(encoded));
     tests.expect(header.operation == Operation::Put,
@@ -61,6 +66,14 @@ void test_exact_version_one_layout(TestRunner& tests) {
                  "header decoder computes the complete record size");
 }
 
+void test_standard_crc32_vector(TestRunner& tests) {
+    const std::string input{"123456789"};
+    tests.expect(minikv::detail::crc32(
+                     std::span<const char>(input.data(), input.size())) ==
+                     0xCBF43926U,
+                 "CRC-32 matches the standard check value");
+}
+
 void test_round_trip(TestRunner& tests) {
     const Record put{Operation::Put,
                      std::string{"key\0bytes", 9},
@@ -71,11 +84,20 @@ void test_round_trip(TestRunner& tests) {
                  "put record survives an encode/decode round trip");
     tests.expect(decoded_put.bytes_consumed == encoded_put.size(),
                  "put decoder reports the full record size");
+
+    const Record tombstone{Operation::Delete,
+                           std::string{"key\0bytes", 9},
+                           {}};
+    const auto encoded_tombstone = minikv::detail::encode_record(tombstone);
+    const auto decoded_tombstone =
+        minikv::detail::decode_record(as_span(encoded_tombstone));
+    tests.expect(decoded_tombstone.record == tombstone,
+                 "DELETE tombstone survives an encode/decode round trip");
 }
 
 void test_multiple_records(TestRunner& tests) {
     const Record first{Operation::Put, "first", "one"};
-    const Record second{Operation::Put, "second", "two"};
+    const Record second{Operation::Delete, "first", {}};
     const Record third{Operation::Put, "third", "three"};
 
     EncodedRecord combined;
@@ -113,13 +135,14 @@ void test_maximum_lengths(TestRunner& tests) {
     const auto encoded = minikv::detail::encode_record(maximum);
     tests.expect(encoded.size() == minikv::detail::record_header_size +
                                        minikv::detail::maximum_key_size +
-                                       minikv::detail::maximum_value_size,
+                                       minikv::detail::maximum_value_size +
+                                       minikv::detail::record_checksum_size,
                  "maximum lengths produce the expected encoded size");
     const auto decoded = minikv::detail::decode_record(as_span(encoded));
     tests.expect(decoded.record == maximum,
                  "maximum allowed key and value lengths round trip");
 
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [] {
             static_cast<void>(minikv::detail::encode_record(Record{
                 Operation::Put,
@@ -127,7 +150,7 @@ void test_maximum_lengths(TestRunner& tests) {
                 {}}));
         },
         "encoder rejects a key above the maximum");
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [] {
             static_cast<void>(minikv::detail::encode_record(Record{
                 Operation::Put,
@@ -143,7 +166,7 @@ void test_malformed_records(TestRunner& tests) {
 
     auto invalid_magic = valid;
     invalid_magic[0] = 'X';
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(invalid_magic)));
@@ -152,7 +175,7 @@ void test_malformed_records(TestRunner& tests) {
 
     auto invalid_reserved = valid;
     invalid_reserved[reserved_offset] = '\1';
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(invalid_reserved)));
@@ -164,7 +187,7 @@ void test_malformed_records(TestRunner& tests) {
         oversized_key,
         key_length_offset,
         static_cast<std::uint32_t>(minikv::detail::maximum_key_size + 1));
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(oversized_key)));
@@ -176,12 +199,29 @@ void test_malformed_records(TestRunner& tests) {
         oversized_value,
         value_length_offset,
         static_cast<std::uint32_t>(minikv::detail::maximum_value_size + 1));
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(oversized_value)));
         },
         "decoder rejects an oversized encoded value length");
+
+    auto invalid_tombstone = valid;
+    invalid_tombstone[operation_offset] =
+        std::bit_cast<char>(static_cast<std::uint8_t>(Operation::Delete));
+    tests.expect_throws<InvalidRecordError>(
+        [&] {
+            static_cast<void>(
+                minikv::detail::decode_record(as_span(invalid_tombstone)));
+        },
+        "decoder rejects a tombstone with value bytes");
+
+    tests.expect_throws<InvalidRecordError>(
+        [] {
+            static_cast<void>(minikv::detail::encode_record(
+                Record{Operation::Delete, "key", "not allowed"}));
+        },
+        "encoder rejects a tombstone with a value");
 }
 
 void test_truncated_input(TestRunner& tests) {
@@ -189,7 +229,7 @@ void test_truncated_input(TestRunner& tests) {
         Record{Operation::Put, "key", "value"});
     for (std::size_t prefix_size = 0; prefix_size < encoded.size();
          ++prefix_size) {
-        tests.expect_throws<RecordError>(
+        tests.expect_throws<IncompleteRecordError>(
             [&] {
                 static_cast<void>(minikv::detail::decode_record(
                     std::span<const char>(encoded.data(), prefix_size)));
@@ -203,8 +243,8 @@ void test_invalid_version_and_operation(TestRunner& tests) {
         minikv::detail::encode_record(Record{Operation::Put, "key", "value"});
 
     auto invalid_version = valid;
-    invalid_version[version_offset] = '\2';
-    tests.expect_throws<RecordError>(
+    invalid_version[version_offset] = '\1';
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(invalid_version)));
@@ -214,23 +254,14 @@ void test_invalid_version_and_operation(TestRunner& tests) {
     auto invalid_operation = valid;
     invalid_operation[operation_offset] =
         std::bit_cast<char>(static_cast<std::uint8_t>(0xFF));
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [&] {
             static_cast<void>(
                 minikv::detail::decode_record(as_span(invalid_operation)));
         },
         "decoder rejects an unknown operation");
 
-    auto premature_delete = valid;
-    premature_delete[operation_offset] = '\2';
-    tests.expect_throws<RecordError>(
-        [&] {
-            static_cast<void>(
-                minikv::detail::decode_record(as_span(premature_delete)));
-        },
-        "decoder rejects the deferred DELETE operation");
-
-    tests.expect_throws<RecordError>(
+    tests.expect_throws<InvalidRecordError>(
         [] {
             static_cast<void>(minikv::detail::encode_record(
                 Record{static_cast<Operation>(0xFF), "key", "value"}));
@@ -238,12 +269,36 @@ void test_invalid_version_and_operation(TestRunner& tests) {
         "encoder rejects an unknown operation");
 }
 
+void test_checksum_mismatch(TestRunner& tests) {
+    const auto valid =
+        minikv::detail::encode_record(Record{Operation::Put, "key", "value"});
+
+    auto corrupted_payload = valid;
+    corrupted_payload[minikv::detail::record_header_size] ^= 0x01;
+    tests.expect_throws<ChecksumMismatchError>(
+        [&] {
+            static_cast<void>(
+                minikv::detail::decode_record(as_span(corrupted_payload)));
+        },
+        "decoder detects a corrupted payload byte");
+
+    auto corrupted_checksum = valid;
+    corrupted_checksum.back() ^= 0x01;
+    tests.expect_throws<ChecksumMismatchError>(
+        [&] {
+            static_cast<void>(
+                minikv::detail::decode_record(as_span(corrupted_checksum)));
+        },
+        "decoder detects a corrupted checksum byte");
+}
+
 }  // namespace
 
 int main() {
     TestRunner tests;
 
-    test_exact_version_one_layout(tests);
+    test_exact_version_two_layout(tests);
+    test_standard_crc32_vector(tests);
     test_round_trip(tests);
     test_multiple_records(tests);
     test_empty_value(tests);
@@ -251,6 +306,7 @@ int main() {
     test_malformed_records(tests);
     test_truncated_input(tests);
     test_invalid_version_and_operation(tests);
+    test_checksum_mismatch(tests);
 
     return tests.finish();
 }

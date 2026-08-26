@@ -9,13 +9,15 @@
 
 namespace minikv::detail {
 
-inline constexpr std::uint8_t record_format_version = 1;
+inline constexpr std::uint8_t record_format_version = 2;
 inline constexpr std::size_t record_header_size = 16;
+inline constexpr std::size_t record_checksum_size = 4;
 inline constexpr std::size_t maximum_key_size = 64U * 1024U;
 inline constexpr std::size_t maximum_value_size = 4U * 1024U * 1024U;
 
 enum class Operation : std::uint8_t {
     Put = 1,
+    Delete = 2,
 };
 
 struct Record {
@@ -45,6 +47,22 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+class InvalidRecordError : public RecordError {
+public:
+    using RecordError::RecordError;
+};
+
+class IncompleteRecordError : public RecordError {
+public:
+    using RecordError::RecordError;
+};
+
+class ChecksumMismatchError : public RecordError {
+public:
+    using RecordError::RecordError;
+};
+
+[[nodiscard]] std::uint32_t crc32(std::span<const char> input) noexcept;
 [[nodiscard]] EncodedRecord encode_record(const Record& record);
 [[nodiscard]] DecodedRecordHeader decode_record_header(
     std::span<const char> input);

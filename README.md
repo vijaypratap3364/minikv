@@ -4,10 +4,10 @@ MiniKV is a small persistent key-value storage engine written in modern C++.
 Its purpose is to make the mechanics below a database API understandable:
 persistence, indexing, recovery, concurrency, compaction, and performance.
 
-The project writes `PUT` operations to a versioned binary append-only log, then
-updates an in-memory hash index from each key to its newest record location.
-Opening a database scans and validates the log to rebuild that index, so PUTs
-survive restart. `DELETE` remains in-memory only until Stage 4.
+The project writes `PUT` and `DELETE` operations to a checksummed, versioned
+binary append-only log. It keeps an in-memory hash index from each live key to
+its newest PUT record location. Opening a database validates and replays PUTs
+and DELETE tombstones, so both values and deletions survive restart.
 
 ## Design direction
 
@@ -47,16 +47,17 @@ const bool removed = store.erase("course");
 ```
 
 `put` inserts or overwrites, `get` returns `std::nullopt` for a missing key, and
-`erase` reports whether it removed an existing key, but does not write to disk
-through Stage 3. Consequently, an erased key reappears after restart if an older
-PUT exists for it. PUT records are appended before the index changes. Empty
-strings and embedded NUL bytes are valid in both keys and values, within the
-documented size limits.
+`erase` reports whether it removed an existing key. It appends a tombstone before
+removing that key from the index; erasing a missing key returns `false` without
+writing. PUTs and tombstones reach the log before memory changes. Empty strings
+and embedded NUL bytes are valid in keys and PUT values, within the documented
+size limits.
 
-See [the version 1 file format](docs/file-format.md) for the byte layout and
-validation rules. Startup rejects malformed or truncated content instead of
-silently skipping it. This stage flushes the C++ file stream after each record
-but does not yet promise power-loss durability.
+See [the version 2 file format](docs/file-format.md) for the byte layout, CRC-32,
+and validation rules. Startup distinguishes invalid format, checksum mismatch,
+and incomplete input instead of silently skipping corruption. This stage
+flushes the C++ file stream after each record but does not yet promise power-loss
+durability.
 
 ## Build and run
 

@@ -78,7 +78,7 @@ LocatedRecord StorageLog::read_at(std::uint64_t offset) const {
             throw StorageError("could not read storage log header: " +
                                path_.string());
         }
-        throw RecordError("record header is truncated");
+        throw IncompleteRecordError("record header is incomplete");
     }
 
     const auto header = decode_record_header(header_bytes);
@@ -96,7 +96,8 @@ LocatedRecord StorageLog::read_at(std::uint64_t offset) const {
                 throw StorageError("could not read storage log payload: " +
                                    path_.string());
             }
-            throw RecordError("record payload is truncated");
+            throw IncompleteRecordError(
+                "record payload or checksum is incomplete");
         }
     }
 
