@@ -45,27 +45,31 @@ void test_missing_and_delete(TestRunner& tests,
     tests.expect(!store.contains("missing"), "contains rejects a missing key");
     tests.expect(!store.get("missing").has_value(),
                  "get returns nullopt for a missing key");
-    const auto initial_log_size = std::filesystem::file_size(log_path);
+    const auto initial_log_size = minikv::test::database_data_size(log_path);
     tests.expect(!store.erase("missing"),
                  "erase returns false for a missing key");
-    tests.expect(std::filesystem::file_size(log_path) == initial_log_size,
+    tests.expect(minikv::test::database_data_size(log_path) == initial_log_size,
                  "erasing a missing key does not append a record");
 
     store.put("temporary", "value");
-    const auto log_size_before_delete = std::filesystem::file_size(log_path);
+    const auto log_size_before_delete =
+        minikv::test::database_data_size(log_path);
     tests.expect(store.erase("temporary"),
                  "erase returns true for an existing key");
-    tests.expect(std::filesystem::file_size(log_path) > log_size_before_delete,
+    tests.expect(minikv::test::database_data_size(log_path) >
+                     log_size_before_delete,
                  "erasing an existing key appends a tombstone");
     tests.expect(!store.contains("temporary"),
                  "an erased key is no longer contained");
     tests.expect(!store.get("temporary").has_value(),
                  "get cannot read an erased key");
     tests.expect(store.empty(), "erasing the only key empties the store");
-    const auto log_size_after_delete = std::filesystem::file_size(log_path);
+    const auto log_size_after_delete =
+        minikv::test::database_data_size(log_path);
     tests.expect(!store.erase("temporary"),
                  "erasing the same key twice returns false");
-    tests.expect(std::filesystem::file_size(log_path) == log_size_after_delete,
+    tests.expect(minikv::test::database_data_size(log_path) ==
+                     log_size_after_delete,
                  "repeated deletion does not append another tombstone");
 }
 
@@ -128,7 +132,8 @@ void test_mutations_are_appended(TestRunner& tests,
                      "delete removes the current value");
     }
 
-    const auto bytes = minikv::test::read_file(log_path);
+    const auto bytes = minikv::test::read_file(
+        minikv::test::active_segment_path(log_path));
     const std::span<const char> input(bytes.data(), bytes.size());
     std::size_t offset = 0;
 
@@ -171,7 +176,7 @@ void test_rejected_put_does_not_change_state(
         "put reports an encoding failure");
     tests.expect(store.empty(),
                  "a rejected put does not update the in-memory map");
-    tests.expect(std::filesystem::file_size(log_path) == 0,
+    tests.expect(minikv::test::database_data_size(log_path) == 0,
                  "a rejected put does not append log bytes");
 }
 
@@ -238,7 +243,7 @@ void test_empty_and_nonexistent_databases(
                  "opening a nonexistent database creates its log");
 
     const auto empty = directory / "empty.minikv";
-    minikv::test::write_file(empty, {});
+    std::filesystem::create_directory(empty);
     minikv::MiniKV store(empty);
     tests.expect(store.empty(), "an existing empty database recovers cleanly");
 }
@@ -380,7 +385,7 @@ void test_torn_tail_recovery(
                          static_cast<std::ptrdiff_t>(fault.prefix_size));
         const auto log_path =
             directory / (std::string(fault.name) + ".minikv");
-        minikv::test::write_file(log_path, bytes);
+        minikv::test::initialize_database_with_segment(log_path, bytes);
 
         {
             minikv::MiniKV recovered(log_path, fault.mode);
@@ -392,7 +397,8 @@ void test_torn_tail_recovery(
                          "torn-tail recovery preserves the second record");
             tests.expect(!recovered.get(torn_key).has_value(),
                          "torn-tail recovery does not expose a partial record");
-            tests.expect(std::filesystem::file_size(log_path) ==
+            tests.expect(std::filesystem::file_size(
+                             minikv::test::active_segment_path(log_path)) ==
                              valid_prefix_size,
                          "torn-tail recovery truncates to the verified offset");
             recovered.put("after-recovery", fault.name);
@@ -413,13 +419,15 @@ void test_torn_tail_recovery(
     complete_bytes.insert(
         complete_bytes.end(), candidate.begin(), candidate.end());
     const auto complete_path = directory / "complete-record.minikv";
-    minikv::test::write_file(complete_path, complete_bytes);
+    minikv::test::initialize_database_with_segment(
+        complete_path, complete_bytes);
 
     minikv::MiniKV complete(complete_path);
     tests.expect(complete.get(torn_key) ==
                      std::optional<std::string>{torn_value},
                  "a complete checksum-valid final record is recovered");
-    tests.expect(std::filesystem::file_size(complete_path) ==
+    tests.expect(std::filesystem::file_size(
+                     minikv::test::active_segment_path(complete_path)) ==
                      complete_bytes.size(),
                  "recovery does not truncate a complete final record");
 }
@@ -431,7 +439,8 @@ void test_corruption_fails_recovery(
         minikv::detail::Record{minikv::detail::Operation::Put, "key", "value"});
     invalid_magic[0] = 'X';
     const auto invalid_magic_path = directory / "invalid-magic.minikv";
-    minikv::test::write_file(invalid_magic_path, invalid_magic);
+    minikv::test::initialize_database_with_segment(
+        invalid_magic_path, invalid_magic);
     tests.expect_throws<minikv::detail::InvalidRecordError>(
         [&] { minikv::MiniKV store(invalid_magic_path); },
         "recovery distinguishes invalid record format");
@@ -448,12 +457,14 @@ void test_corruption_fails_recovery(
     valid_prefix.insert(
         valid_prefix.end(), valid_suffix.begin(), valid_suffix.end());
     const auto checksum_path = directory / "checksum-mismatch.minikv";
-    minikv::test::write_file(checksum_path, valid_prefix);
-    const auto corrupt_file_size = std::filesystem::file_size(checksum_path);
+    minikv::test::initialize_database_with_segment(
+        checksum_path, valid_prefix);
+    const auto corrupt_file_size = minikv::test::database_data_size(
+        checksum_path);
     tests.expect_throws<minikv::detail::ChecksumMismatchError>(
         [&] { minikv::MiniKV store(checksum_path); },
         "recovery rejects checksum corruption between valid records");
-    tests.expect(std::filesystem::file_size(checksum_path) ==
+    tests.expect(minikv::test::database_data_size(checksum_path) ==
                      corrupt_file_size,
                  "recovery never truncates complete corrupted data");
 }

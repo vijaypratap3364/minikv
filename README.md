@@ -4,11 +4,12 @@ MiniKV is a small persistent key-value storage engine written in modern C++.
 Its purpose is to make the mechanics below a database API understandable:
 persistence, indexing, recovery, concurrency, compaction, and performance.
 
-The project writes `PUT` and `DELETE` operations to a checksummed, versioned
-binary append-only log. It keeps an in-memory hash index from each live key to
-its newest PUT record location. Opening a database validates and replays PUTs
-and DELETE tombstones. A clearly incomplete final append is removed at its last
-verified boundary, while complete corruption remains a fatal error.
+The project writes `PUT` and `DELETE` operations to checksummed, versioned binary
+records in numbered append-only segment files. It keeps an in-memory hash index
+from each live key to its newest PUT record's segment and byte location. Opening
+a database validates and replays segments in order. A clearly incomplete append
+in the active segment is removed at its last verified boundary, while corruption
+in an immutable segment remains fatal.
 Public operations on one live instance are safe to call from multiple threads.
 
 ## Design direction
@@ -40,7 +41,9 @@ No database, service, VM, WSL installation, or Docker installation is required.
 
 minikv::MiniKV store(
     "example.minikv",
-    minikv::DurabilityMode::Sync);
+    minikv::MiniKVOptions{
+        minikv::DurabilityMode::Sync,
+        64U * 1024U * 1024U});
 store.put("course", "storage systems");
 
 if (const auto value = store.get("course")) {
@@ -56,6 +59,13 @@ removing that key from the index; erasing a missing key returns `false` without
 writing. PUTs and tombstones reach the log before memory changes. Empty strings
 and embedded NUL bytes are valid in keys and PUT values, within the documented
 size limits.
+
+The path passed to `MiniKV` is a database directory, not a single log file. Its
+`CURRENT` manifest selects one generation containing numbered segment files.
+The final segment is active and receives appends; rollover makes prior segments
+immutable. `maximum_segment_size` is a rollover target: a single valid record is
+allowed to exceed it rather than becoming impossible to store. The default is
+64 MiB. Stage 6 single-file databases are not migrated automatically.
 
 MiniKV currently uses one mutex per instance, so concurrent calls are safe but
 serialize at the API boundary, including GETs. Do not open the same log through

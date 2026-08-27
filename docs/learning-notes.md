@@ -421,3 +421,69 @@ valuable. Before introducing shared locking, MiniKV needs a storage-read design
 whose file position is not shared, plus benchmarks proving the extra complexity
 addresses a real bottleneck. File growth from obsolete PUTs and tombstones also
 remains the next roadmap problem for segmentation and compaction.
+
+## Segments: making the append log manageable
+
+### 1. What problem existed?
+
+One append-only file grew forever. Every overwrite left the previous PUT behind,
+and every DELETE left both its tombstone and the value it hid. The index stopped
+referencing stale records, but their bytes still occupied disk space. A single
+ever-growing file is also awkward to replace safely because there is no natural
+boundary between established history and current writes.
+
+### 2. What did we build?
+
+A MiniKV path now names a database directory. Its `CURRENT` manifest selects a
+numbered generation directory containing contiguous numbered segment files. An
+active segment is the final file and is the only one that receives appends. When
+the configured size target would be exceeded, MiniKV creates a new active
+segment. The previous files become immutable segments: files MiniKV promises not
+to modify again during normal writes.
+
+The in-memory index location now contains a segment identifier, byte offset, and
+record size. The version 2 bytes inside each record did not change.
+
+### 3. How does it solve the problem?
+
+Rollover bounds the ordinary size of an individual file and gives later work
+whole immutable inputs that can be scanned or replaced. GET can still reach one
+record directly because its index entry identifies both the file and position.
+Startup recovers the same total order by visiting segment identifiers and then
+record offsets in ascending order, so the newest operation still wins.
+
+The size setting is a rollover target rather than a new record limit. A valid
+record larger than the target is written alone; otherwise choosing a target
+smaller than one value would make that value impossible to store.
+
+### 4. What happens internally?
+
+`SegmentedStorage` reads `CURRENT`, validates the selected generation, sorts and
+validates contiguous segment names, and opens only the highest segment for
+append. PUT and DELETE encode first, roll over if needed, append to the active
+segment, and return a segment-aware location before MiniKV changes its index.
+
+Recovery treats an incomplete record differently based on location. A torn EOF
+in the active segment can be the interrupted final append and is truncated to
+its last verified boundary. An incomplete record in an older immutable segment
+cannot be the latest append, so it is reported as corruption and is not changed.
+
+### 5. What can still go wrong?
+
+Segmenting does not itself save space: it only divides the same history into
+manageable files. Losing a segment, creating an identifier gap, corrupting the
+manifest, or opening the same directory through uncoordinated instances remains
+an error. The Stage 6 single-file layout is not automatically migrated to the
+new directory layout.
+
+The active-segment mutex is still coarse, and recovery still scans every byte in
+the selected generation. A very small size target creates many files and more
+filesystem overhead; a very large target reduces the benefit of boundaries.
+
+### 6. What new problem does this design introduce?
+
+MiniKV now has enough boundaries to compact, but it must replace a whole logical
+history safely. Writing new files is not enough: a crash must leave either the
+old complete generation or the new complete generation selected, never a mix.
+The next milestone needs temporary output, an atomic manifest switch, delayed
+deletion of old segments, and deterministic interruption tests.

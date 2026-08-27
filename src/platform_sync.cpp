@@ -60,11 +60,29 @@ void sync_file_to_storage(const std::filesystem::path& path) {
     }
 }
 
+void replace_file_atomically(const std::filesystem::path& source,
+                             const std::filesystem::path& destination,
+                             bool durable) {
+    auto flags = MOVEFILE_REPLACE_EXISTING;
+    if (durable) {
+        flags |= MOVEFILE_WRITE_THROUGH;
+    }
+    if (MoveFileExW(source.wstring().c_str(),
+                    destination.wstring().c_str(),
+                    flags) == 0) {
+        throw std::system_error(
+            static_cast<int>(GetLastError()),
+            std::system_category(),
+            "could not atomically replace file");
+    }
+}
+
 }  // namespace minikv::detail
 
 #else
 
 #include <cerrno>
+#include <cstdio>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -113,6 +131,54 @@ void sync_file_to_storage(const std::filesystem::path& path) {
                 errno, std::generic_category(), "fsync failed");
         }
     }
+}
+
+namespace {
+
+void sync_directory_to_storage(const std::filesystem::path& path) {
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+
+    FileDescriptor descriptor(::open(path.c_str(), flags));
+    if (descriptor.get() < 0) {
+        throw std::system_error(
+            errno, std::generic_category(), "could not open directory for fsync");
+    }
+
+    while (::fsync(descriptor.get()) != 0) {
+        if (errno != EINTR) {
+            throw std::system_error(
+                errno, std::generic_category(), "directory fsync failed");
+        }
+    }
+}
+
+void rename_path(const std::filesystem::path& source,
+                 const std::filesystem::path& destination,
+                 bool durable,
+                 const char* description) {
+    if (::rename(source.c_str(), destination.c_str()) != 0) {
+        throw std::system_error(errno, std::generic_category(), description);
+    }
+    if (durable) {
+        sync_directory_to_storage(destination.parent_path());
+    }
+}
+
+}  // namespace
+
+void replace_file_atomically(const std::filesystem::path& source,
+                             const std::filesystem::path& destination,
+                             bool durable) {
+    rename_path(source,
+                destination,
+                durable,
+                "could not atomically replace file");
 }
 
 }  // namespace minikv::detail

@@ -33,7 +33,7 @@ int main(int argument_count, char* arguments[]) {
         std::cout << "language exists after delete + restart: "
                   << std::boolalpha << after_delete.contains("language")
                   << '\n';
-        std::cout << "records appended to " << log_path << '\n';
+        std::cout << "database directory: " << log_path << '\n';
         std::cout << "DELETE persists as a checksummed tombstone\n";
         std::cout << "demo writes request native durable sync\n";
         return 0;

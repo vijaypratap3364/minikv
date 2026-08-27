@@ -2,18 +2,20 @@
 
 ## Current implementation
 
-MiniKV records PUTs and DELETE tombstones in a checksummed, versioned append-only
-file. Its in-memory hash index maps each live key to its newest PUT record's
-offset and encoded size. Values remain in the log and are read from disk on
-demand. One `MiniKV` instance can be used safely by multiple threads.
+MiniKV records PUTs and DELETE tombstones in checksummed, versioned append-only
+segment files. Its in-memory hash index maps each live key to its newest PUT
+record's segment identifier, segment-relative offset, and encoded size. Values
+remain in the segments and are read from disk on demand. One `MiniKV` instance
+can be used safely by multiple threads.
 
 ```text
 Client PUT
   -> minikv::MiniKV logical operation
   -> acquire the instance mutex
   -> Record encoder
+  -> SegmentedStorage selects or rolls the active segment
   -> StorageLog append + stream flush
-  -> log file / OS page cache
+  -> active segment / OS page cache
   -> optional OS durable sync request
   -> in-memory key-to-record-location update
 
@@ -33,29 +35,30 @@ Client GET
   -> copied value
 
 Startup
-  -> scan records from offset zero
+  -> read CURRENT to select a generation
+  -> scan numbered segments and records in order
   -> validate format, length, and CRC-32 of each record
   -> PUT assigns its location to the key
   -> DELETE removes the key
-  -> incomplete EOF record truncates back to the last valid offset
+  -> incomplete EOF record in the active segment truncates to its last valid offset
 
 Client CONTAINS
   -> in-memory index
 ```
 
-The three responsibilities are deliberately separate. `MiniKV` defines logical
-behavior, the record codec defines bytes, and `StorageLog` owns file I/O and the
-next append offset. See [the file-format specification](file-format.md) for the
-stable version 2 layout.
+The responsibilities remain separate. `MiniKV` defines logical behavior, the
+record codec defines bytes, `StorageLog` owns I/O within one file, and
+`SegmentedStorage` owns the manifest, segment ordering, rollover, and complete
+record locations. See [the file-format specification](file-format.md) for the
+stable version 2 record and segment-container layouts.
 
-Each `MiniKV` is constructed with a log path. Opening creates the file if needed,
-discovers its current size, and scans records sequentially from offset zero.
-Applying records in order makes the newest operation for a key win. A later PUT
-replaces an earlier location, while a later DELETE removes it. Empty and
-nonexistent database files recover as empty databases. If EOF arrives partway
-through the next record, recovery keeps every checksum-verified record and
-truncates the incomplete tail. A complete checksum mismatch or invalid record
-format remains fatal and is never truncated.
+Each `MiniKV` is constructed with a database-directory path. `CURRENT` selects a
+numbered generation directory. Recovery scans its contiguous segment identifiers
+in ascending order and scans records from offset zero within each segment.
+Applying records in that total order makes the newest operation for a key win.
+The highest numbered segment is active; prior segments are immutable. EOF during
+a record is repaired only in that active segment. The same condition in an older
+segment is established corruption, as are checksum and format failures.
 
 ## API semantics
 
@@ -69,21 +72,21 @@ format remains fatal and is never truncated.
 Empty keys and values are valid. A present empty value is distinguishable from a
 missing key because only the latter returns `std::nullopt`. Keys and values may
 contain arbitrary bytes, including NUL. Calls through one live `MiniKV` instance
-are synchronized. Independently opening the same log through multiple instances
+are synchronized. Independently opening the same database through multiple instances
 or processes is not supported because the per-instance mutex cannot coordinate
 their streams, offsets, or indexes.
 
 If PUT or DELETE encoding, append, stream flush, or durable sync fails, the
 exception reaches the caller and the in-memory index is not changed. Because a
 failed system call can have an ambiguous outcome, that `MiniKV` instance rejects
-later appends. Restart validates the file: a partial final append is truncated,
+later appends. Restart validates every segment: a partial final append is truncated,
 while a complete valid record may be replayed even if its caller observed a sync
 error.
 
 The hash table gives expected average constant-time index lookup, insertion, and
 deletion. A pathological collision pattern can degrade an operation to linear
 time. `GET` additionally performs a seek and reads and decodes one record, while
-startup recovery is linear in the file's records and bytes. Hashing still
+startup recovery is linear in all current-generation records and bytes. Hashing still
 examines the key bytes, so key and value lengths affect real cost.
 
 ## Concurrency model
@@ -93,8 +96,8 @@ The shared mutable state and its unsynchronized failure modes are:
 | State | What can race without a lock |
 | --- | --- |
 | Hash index | Concurrent lookup, insertion, rehash, and erase would access `std::unordered_map` unsafely and can corrupt its internal structure. |
-| Append stream and file bytes | Two writers could race on stream state or produce records in an order neither caller can relate to its index update. |
-| Next append offset | Writers could calculate overlapping or incorrect record locations and lose offset updates. |
+| Active segment, append stream, and file bytes | Two writers could race on rollover or stream state and produce records in an order neither caller can relate to its index update. |
+| Segment list and next append offset | Writers could select conflicting active segments, calculate incorrect record locations, or lose offset updates. |
 | Read stream | Concurrent seeks and reads would overwrite the stream's shared file position and status flags. |
 | Append-failure metadata | One thread could miss another thread's failure and continue using an instance whose append outcome is ambiguous. |
 
@@ -134,31 +137,37 @@ The current data flow is:
 ```text
 Client
   -> MiniKV API (PUT, GET, DELETE)
-  -> in-memory index (key to latest record location)
-  -> append-only storage log (PUT records and DELETE tombstones)
+  -> in-memory index (key to segment + latest record location)
+  -> manifest-selected generation
+  -> immutable segments + one append-only active segment
   -> disk
 ```
 
 The API defines observable behavior, the index avoids scanning the whole log for
-each read, and the log is the source used to rebuild locations after restart.
-The append-only design deliberately leaves old versions on disk; they are no
-longer indexed when superseded, but they make the file grow until a later
-compaction stage rewrites only live data. Tombstones also remain because the log
-is never rewritten in place. Every version 2 record carries a CRC-32 that detects
-many accidental byte changes, but it neither repairs data nor authenticates it
-against deliberate modification.
+each read, and the ordered segments are the source used to rebuild locations
+after restart. A configurable rollover target bounds ordinary segment growth.
+If a record would exceed the target in a nonempty segment, MiniKV creates the
+next numbered active segment and never appends to the previous one again. One
+record may exceed the target when it occupies a segment alone.
+
+Segmentation makes files manageable but does not reclaim space. Old versions and
+tombstones remain in immutable segments after the index stops referencing them.
+Compaction is still required to rewrite only live state into a replacement
+generation. Every version 2 record carries a CRC-32 that detects many accidental
+byte changes, but it neither repairs data nor authenticates it.
 
 ## Crash recovery policy
 
 Recovery trusts only complete records whose format and CRC-32 validate. When a
-sequential read begins at a verified record boundary but EOF arrives before the
-next header, payload, or checksum is complete, MiniKV classifies all remaining
-bytes as a torn final append. It resizes the file to that verified boundary and
-continues with the recovered index. In Sync mode, it also syncs the truncation.
+sequential read in the active segment begins at a verified record boundary but
+EOF arrives before the next header, payload, or checksum is complete, MiniKV
+classifies all remaining bytes as a torn final append. It resizes that segment
+to the verified boundary and continues. In Sync mode, it also syncs truncation.
 
-This rule is intentionally limited to EOF truncation. Invalid magic, version,
-operation, bounds, tombstone shape, or a checksum mismatch in a complete record
-aborts opening and leaves the file unchanged. MiniKV does not search for a later
+This rule is intentionally limited to the final segment's EOF. An incomplete
+record in an immutable segment, invalid magic, version, operation, bounds,
+tombstone shape, or a checksum mismatch in a complete record aborts opening and
+leaves the segment unchanged. MiniKV does not search for a later
 magic sequence, because guessing a new boundary could silently discard or
 misinterpret established data. A bounded length field corrupted so that it
 extends beyond EOF is indistinguishable from a torn append and therefore follows
@@ -175,9 +184,10 @@ but an OS crash or power loss can lose those writes.
 platform boundary in `platform_sync.cpp`: `FlushFileBuffers` on Windows and
 `fsync` on POSIX. The index changes and the operation returns only after that
 call succeeds. Under the operating system and storage device's documented
-contract, this provides a power-loss durability request for the log file's data
-and length. It does not sync the parent directory entry for a newly created log,
-and hardware or virtualized storage can still violate flush guarantees.
+contract, this provides a power-loss durability request for segment data and
+length. `CURRENT` installation uses an atomic same-filesystem replace, with
+`MOVEFILE_WRITE_THROUGH` on Windows or a parent-directory `fsync` after `rename`
+on POSIX. Hardware or virtualized storage can still violate flush guarantees.
 
 Sync mode is slower because it reduces batching and waits for lower storage
 layers. Neither mode provides transactions across multiple records, isolation,
@@ -187,7 +197,8 @@ atomic multi-key changes, authentication, or a general ACID guarantee.
 
 - `include/minikv`: public library interface
 - `src/record.*`: private binary record model and codec
-- `src/storage_log.*`: private append-only disk I/O
+- `src/storage_log.*`: private I/O for one segment file
+- `src/segmented_storage.*`: manifest, segment ordering, and rollover
 - `src/platform_sync.*`: one Windows/POSIX durable-flush boundary
 - `src/minikv.cpp`: logical operation ordering and in-memory state
 - `tools`: small programs that use the public interface

@@ -15,8 +15,11 @@
 namespace minikv::detail {
 
 StorageLog::StorageLog(std::filesystem::path path,
-                       DurabilityMode durability_mode)
-    : path_(std::move(path)), durability_mode_(durability_mode) {
+                       DurabilityMode durability_mode,
+                       StorageLogMode mode)
+    : path_(std::move(path)),
+      durability_mode_(durability_mode),
+      mode_(mode) {
     if (durability_mode_ != DurabilityMode::Buffered &&
         durability_mode_ != DurabilityMode::Sync) {
         throw StorageError("storage log has an invalid durability mode");
@@ -37,12 +40,18 @@ StorageLog::StorageLog(std::filesystem::path path,
 }
 
 AppendResult StorageLog::append(const Record& record) {
+    return append_encoded(encode_record(record));
+}
+
+AppendResult StorageLog::append_encoded(const EncodedRecord& encoded) {
+    if (mode_ != StorageLogMode::Append) {
+        throw StorageError("cannot append to an immutable storage segment");
+    }
     if (append_failed_) {
         throw StorageError(
             "storage log cannot append after an earlier append failure");
     }
 
-    const auto encoded = encode_record(record);
     if (encoded.size() >
         static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())) {
         throw StorageError("encoded record is too large to write");
@@ -135,7 +144,21 @@ std::uint64_t StorageLog::size() const noexcept {
     return next_offset_;
 }
 
+void StorageLog::seal() {
+    if (mode_ == StorageLogMode::ReadOnly) {
+        return;
+    }
+    append_stream_.close();
+    if (!append_stream_) {
+        throw StorageError("could not close active storage segment");
+    }
+    mode_ = StorageLogMode::ReadOnly;
+}
+
 void StorageLog::truncate(std::uint64_t size) {
+    if (mode_ != StorageLogMode::Append) {
+        throw StorageError("cannot truncate an immutable storage segment");
+    }
     if (size > next_offset_) {
         throw StorageError("cannot extend storage log during tail recovery");
     }
@@ -159,10 +182,13 @@ void StorageLog::truncate(std::uint64_t size) {
 void StorageLog::open_streams() {
     append_stream_.clear();
     read_stream_.clear();
-    append_stream_.open(
-        path_, std::ios::binary | std::ios::out | std::ios::app);
+    if (mode_ == StorageLogMode::Append) {
+        append_stream_.open(
+            path_, std::ios::binary | std::ios::out | std::ios::app);
+    }
     read_stream_.open(path_, std::ios::binary | std::ios::in);
-    if (!append_stream_.is_open() || !read_stream_.is_open()) {
+    if ((mode_ == StorageLogMode::Append && !append_stream_.is_open()) ||
+        !read_stream_.is_open()) {
         throw StorageError("could not open storage log: " + path_.string());
     }
 }

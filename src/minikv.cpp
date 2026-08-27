@@ -1,7 +1,7 @@
 #include "minikv/minikv.hpp"
 
 #include "record.hpp"
-#include "storage_log.hpp"
+#include "segmented_storage.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -11,18 +11,24 @@
 
 namespace minikv {
 
-MiniKV::MiniKV(std::filesystem::path log_path,
-               DurabilityMode durability_mode)
-    : storage_log_(std::make_unique<detail::StorageLog>(
-          std::move(log_path), durability_mode)) {
+MiniKV::MiniKV(std::filesystem::path database_path, MiniKVOptions options)
+    : storage_(std::make_unique<detail::SegmentedStorage>(
+          std::move(database_path),
+          options.durability_mode,
+          options.maximum_segment_size)) {
     recover();
 }
+
+MiniKV::MiniKV(std::filesystem::path database_path,
+               DurabilityMode durability_mode)
+    : MiniKV(std::move(database_path),
+             MiniKVOptions{durability_mode, 64U * 1024U * 1024U}) {}
 
 MiniKV::~MiniKV() = default;
 
 MiniKV::MiniKV(MiniKV&& other) {
     std::unique_lock lock(other.mutex_);
-    storage_log_ = std::move(other.storage_log_);
+    storage_ = std::move(other.storage_);
     index_ = std::move(other.index_);
 }
 
@@ -32,7 +38,7 @@ MiniKV& MiniKV::operator=(MiniKV&& other) {
     }
 
     std::scoped_lock lock(mutex_, other.mutex_);
-    storage_log_ = std::move(other.storage_log_);
+    storage_ = std::move(other.storage_);
     index_ = std::move(other.index_);
     return *this;
 }
@@ -41,9 +47,11 @@ void MiniKV::put(Key key, Value value) {
     std::lock_guard lock(mutex_);
     detail::Record record{
         detail::Operation::Put, std::move(key), std::move(value)};
-    const auto location = storage_log_->append(record);
+    const auto location = storage_->append(record);
     index_.insert_or_assign(
-        std::move(record.key), IndexEntry{location.offset, location.size});
+        std::move(record.key),
+        IndexEntry{
+            location.segment_id, location.offset, location.record_size});
 }
 
 std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
@@ -53,8 +61,10 @@ std::optional<MiniKV::Value> MiniKV::get(const Key& key) const {
         return std::nullopt;
     }
 
-    auto record = storage_log_->read(detail::AppendResult{
-        entry->second.offset, entry->second.record_size});
+    auto record = storage_->read(detail::SegmentLocation{
+        entry->second.segment_id,
+        entry->second.offset,
+        entry->second.record_size});
     if (record.operation != detail::Operation::Put || record.key != key) {
         throw detail::StorageError(
             "in-memory index points to an unexpected record");
@@ -70,7 +80,7 @@ bool MiniKV::erase(const Key& key) {
     }
 
     const detail::Record tombstone{detail::Operation::Delete, key, {}};
-    static_cast<void>(storage_log_->append(tombstone));
+    static_cast<void>(storage_->append(tombstone));
     index_.erase(entry);
     return true;
 }
@@ -91,25 +101,32 @@ bool MiniKV::empty() const {
 }
 
 void MiniKV::recover() {
-    std::uint64_t offset = 0;
-    while (offset < storage_log_->size()) {
-        try {
-            auto located = storage_log_->read_at(offset);
-            switch (located.record.operation) {
-                case detail::Operation::Put:
-                    index_.insert_or_assign(
-                        std::move(located.record.key),
-                        IndexEntry{located.location.offset,
-                                   located.location.size});
-                    break;
-                case detail::Operation::Delete:
-                    index_.erase(located.record.key);
-                    break;
+    for (const auto segment_id : storage_->segment_ids()) {
+        std::uint64_t offset = 0;
+        while (offset < storage_->segment_size(segment_id)) {
+            try {
+                auto located = storage_->read_at(segment_id, offset);
+                switch (located.record.operation) {
+                    case detail::Operation::Put:
+                        index_.insert_or_assign(
+                            std::move(located.record.key),
+                            IndexEntry{located.location.segment_id,
+                                       located.location.offset,
+                                       located.location.record_size});
+                        break;
+                    case detail::Operation::Delete:
+                        index_.erase(located.record.key);
+                        break;
+                }
+                offset += located.location.record_size;
+            } catch (const detail::IncompleteRecordError&) {
+                if (segment_id != storage_->active_segment_id()) {
+                    throw detail::StorageError(
+                        "an immutable segment contains an incomplete record");
+                }
+                storage_->truncate_active(offset);
+                break;
             }
-            offset += located.location.size;
-        } catch (const detail::IncompleteRecordError&) {
-            storage_log_->truncate(offset);
-            break;
         }
     }
 }

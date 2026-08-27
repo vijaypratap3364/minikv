@@ -63,11 +63,12 @@ by the next one.
 - Document the choice to defer finer-grained shared locking until storage reads
   have an appropriate parallel-I/O design.
 
-## Stage 7 — segments and compaction
+## Stage 7 — segments and compaction (in progress)
 
-- Rotate bounded segment files.
-- Rewrite only live records during compaction.
-- Make replacement crash-safe and recovery-aware.
+- Rotate size-bounded segment files within a manifest-selected generation.
+- Keep older segments immutable and index live records by segment and offset.
+- Rewrite only live records during compaction (pending).
+- Make replacement crash-safe and recovery-aware (pending).
 
 ## Stage 8 — measurement and automation
 

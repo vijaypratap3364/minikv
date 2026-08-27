@@ -23,6 +23,11 @@ struct LocatedRecord {
     AppendResult location;
 };
 
+enum class StorageLogMode {
+    ReadOnly,
+    Append,
+};
+
 class StorageError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -31,7 +36,8 @@ public:
 class StorageLog {
 public:
     StorageLog(std::filesystem::path path,
-               DurabilityMode durability_mode);
+               DurabilityMode durability_mode,
+               StorageLogMode mode = StorageLogMode::Append);
 
     StorageLog(const StorageLog&) = delete;
     StorageLog& operator=(const StorageLog&) = delete;
@@ -39,9 +45,11 @@ public:
     StorageLog& operator=(StorageLog&&) = default;
 
     [[nodiscard]] AppendResult append(const Record& record);
+    [[nodiscard]] AppendResult append_encoded(const EncodedRecord& encoded);
     [[nodiscard]] LocatedRecord read_at(std::uint64_t offset) const;
     [[nodiscard]] Record read(const AppendResult& location) const;
     [[nodiscard]] std::uint64_t size() const noexcept;
+    void seal();
     void truncate(std::uint64_t size);
 
 private:
@@ -53,6 +61,7 @@ private:
     mutable std::ifstream read_stream_;
     std::uint64_t next_offset_{0};
     DurabilityMode durability_mode_;
+    StorageLogMode mode_;
     bool append_failed_{false};
 };
 

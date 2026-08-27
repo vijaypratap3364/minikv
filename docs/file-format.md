@@ -1,7 +1,7 @@
 # MiniKV File Format
 
-This document defines binary record format version 2. A MiniKV log is zero or
-more records concatenated without a separate file header. Every record carries
+This document defines binary record format version 2. A MiniKV segment is zero
+or more records concatenated without a separate file header. Every record carries
 its own magic, version, operation, lengths, and checksum so a reader can validate
 the boundary it was given.
 
@@ -93,11 +93,36 @@ The decoder returns the number of bytes consumed, allowing a caller to advance
 to the next record. Extra bytes after one complete record are not an error
 because they may begin the next record.
 
+## Segment container layout
+
+Record format version 2 did not change when segmentation was introduced. The
+container around those records is now a database directory:
+
+```text
+example.minikv/
+  CURRENT
+  generation-00000000000000000001/
+    segment-00000000000000000001.dat
+    segment-00000000000000000002.dat
+```
+
+`CURRENT` is a small text manifest with its own layout version and the selected
+generation identifier. Segment and generation identifiers are unsigned 64-bit
+values rendered as 20 decimal digits so lexical order matches numeric order.
+Segment identifiers start at one and must be contiguous. The highest numbered
+segment is active; all earlier files are immutable.
+
+The maximum segment size is a rollover target, not a record-format limit. A new
+record goes to a fresh segment when it would make a nonempty active segment
+exceed the configured target. One valid record may itself be larger than that
+target and occupies a segment by itself.
+
 ## Offsets, flushing, and current limits
 
-An offset is a zero-based byte position in the log. The offset returned by an
-append points to the `M` in that record's magic. The in-memory index uses PUT
-offsets to find live values without scanning unrelated records.
+An offset is a zero-based byte position within one segment. The location returned
+by an append combines a segment identifier, the offset of the `M` in that
+record's magic, and the encoded record size. The in-memory index stores that
+complete location to find live values without scanning unrelated records.
 
 The storage log opens files in binary append mode and flushes the C++ stream
 after each record. In buffered durability mode, that is the write-completion

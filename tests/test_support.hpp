@@ -1,11 +1,15 @@
 #pragma once
 
+#include "segmented_storage.hpp"
+
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -124,6 +128,84 @@ inline void write_file(const std::filesystem::path& path,
     output.close();
     if (!output) {
         throw std::runtime_error("could not write test file: " + path.string());
+    }
+}
+
+[[nodiscard]] inline std::uint64_t current_generation_id(
+    const std::filesystem::path& database_path) {
+    std::ifstream input(database_path / "CURRENT");
+    std::string magic;
+    std::uint32_t version = 0;
+    std::uint64_t generation = 0;
+    if (!(input >> magic >> version >> generation) ||
+        magic != "MINIKV-MANIFEST" || version != 1 || generation == 0) {
+        throw std::runtime_error("could not read test database manifest");
+    }
+    return generation;
+}
+
+[[nodiscard]] inline std::filesystem::path current_generation_path(
+    const std::filesystem::path& database_path) {
+    return database_path /
+           minikv::detail::generation_directory_name(
+               current_generation_id(database_path));
+}
+
+[[nodiscard]] inline std::vector<std::filesystem::path> segment_paths(
+    const std::filesystem::path& database_path) {
+    std::vector<std::filesystem::path> paths;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             current_generation_path(database_path))) {
+        if (entry.is_regular_file() &&
+            entry.path().extension() == ".dat") {
+            paths.push_back(entry.path());
+        }
+    }
+    std::ranges::sort(paths);
+    return paths;
+}
+
+[[nodiscard]] inline std::filesystem::path active_segment_path(
+    const std::filesystem::path& database_path) {
+    const auto paths = segment_paths(database_path);
+    if (paths.empty()) {
+        throw std::runtime_error("test database has no active segment");
+    }
+    return paths.back();
+}
+
+[[nodiscard]] inline std::uintmax_t database_data_size(
+    const std::filesystem::path& database_path) {
+    std::uintmax_t size = 0;
+    for (const auto& path : segment_paths(database_path)) {
+        size += std::filesystem::file_size(path);
+    }
+    return size;
+}
+
+inline void initialize_database_with_segment(
+    const std::filesystem::path& database_path,
+    const std::vector<char>& bytes) {
+    const auto generation_id = std::uint64_t{1};
+    const auto generation_path =
+        database_path /
+        minikv::detail::generation_directory_name(generation_id);
+    std::error_code error;
+    if (!std::filesystem::create_directory(database_path, error) && error) {
+        throw std::runtime_error("could not create test database: " +
+                                 error.message());
+    }
+    if (!std::filesystem::create_directory(generation_path, error) && error) {
+        throw std::runtime_error("could not create test generation: " +
+                                 error.message());
+    }
+    write_file(generation_path / minikv::detail::segment_file_name(1), bytes);
+
+    std::ofstream manifest(database_path / "CURRENT", std::ios::trunc);
+    manifest << "MINIKV-MANIFEST 1 " << generation_id << '\n';
+    manifest.close();
+    if (!manifest) {
+        throw std::runtime_error("could not create test database manifest");
     }
 }
 

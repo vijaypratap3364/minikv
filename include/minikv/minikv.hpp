@@ -16,8 +16,13 @@ enum class DurabilityMode {
     Sync,
 };
 
+struct MiniKVOptions {
+    DurabilityMode durability_mode{DurabilityMode::Buffered};
+    std::uint64_t maximum_segment_size{64U * 1024U * 1024U};
+};
+
 namespace detail {
-class StorageLog;
+class SegmentedStorage;
 }
 
 class MiniKV {
@@ -25,11 +30,14 @@ public:
     using Key = std::string;
     using Value = std::string;
 
-    // Buffered flushes each record into the OS caching path. Sync additionally
-    // requests a platform durable flush before a mutation returns.
+    // database_path names a MiniKV directory. Buffered flushes each record into
+    // the OS caching path. Sync additionally requests a platform durable flush
+    // before a mutation returns.
     explicit MiniKV(
-        std::filesystem::path log_path,
-        DurabilityMode durability_mode = DurabilityMode::Buffered);
+        std::filesystem::path database_path,
+        MiniKVOptions options = {});
+    MiniKV(std::filesystem::path database_path,
+           DurabilityMode durability_mode);
     ~MiniKV();
 
     MiniKV(const MiniKV&) = delete;
@@ -54,6 +62,7 @@ public:
 
 private:
     struct IndexEntry {
+        std::uint64_t segment_id;
         std::uint64_t offset;
         std::uint64_t record_size;
     };
@@ -61,7 +70,7 @@ private:
     void recover();
 
     mutable std::mutex mutex_;
-    std::unique_ptr<detail::StorageLog> storage_log_;
+    std::unique_ptr<detail::SegmentedStorage> storage_;
     std::unordered_map<Key, IndexEntry> index_;
 };
 

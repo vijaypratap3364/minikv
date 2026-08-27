@@ -38,6 +38,7 @@ add_library(
     src/minikv.cpp
     src/platform_sync.cpp
     src/record.cpp
+    src/segmented_storage.cpp
     src/storage_log.cpp
     src/version.cpp
 )
@@ -83,6 +84,11 @@ if(BUILD_TESTING)
         minikv.concurrency
     )
     minikv_add_test(record_tests tests/record_test.cpp minikv.record)
+    minikv_add_test(
+        segmented_storage_tests
+        tests/segmented_storage_test.cpp
+        minikv.segmented_storage
+    )
     minikv_add_test(
         storage_log_tests
         tests/storage_log_test.cpp
