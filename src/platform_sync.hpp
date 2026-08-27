@@ -15,4 +15,10 @@ void replace_file_atomically(const std::filesystem::path& source,
                              const std::filesystem::path& destination,
                              bool durable);
 
+// Installs a completed directory at a destination that must not exist. Source
+// and destination must share a filesystem so the rename is atomic.
+void install_directory_atomically(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination,
+                                  bool durable);
+
 }  // namespace minikv::detail

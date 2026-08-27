@@ -17,8 +17,8 @@ Public operations on one live instance are safe to call from multiple threads.
 ```text
 Client
   -> MiniKV API
-  -> in-memory key-to-record-location index
-  -> append-only storage log
+  -> in-memory key-to-segment-location index
+  -> immutable segments + one active segment
   -> disk
 ```
 
@@ -51,6 +51,7 @@ if (const auto value = store.get("course")) {
 }
 
 const bool removed = store.erase("course");
+store.compact();
 ```
 
 `put` inserts or overwrites, `get` returns `std::nullopt` for a missing key, and
@@ -67,8 +68,16 @@ immutable. `maximum_segment_size` is a rollover target: a single valid record is
 allowed to exceed it rather than becoming impossible to store. The default is
 64 MiB. Stage 6 single-file databases are not migrated automatically.
 
+`compact()` is a blocking operation that holds the instance mutex. It rewrites
+only current live PUTs into a temporary generation, validates them, atomically
+installs that generation and switches `CURRENT`, then removes the old generation.
+Deleted keys need no tombstone in the new complete snapshot. If the process
+stops before the manifest switch, restart uses the old generation; afterward it
+uses the new one. Unselected temporary or obsolete generations are cleaned on
+startup. Compaction can briefly require space for both generations.
+
 MiniKV currently uses one mutex per instance, so concurrent calls are safe but
-serialize at the API boundary, including GETs. Do not open the same log through
+serialize at the API boundary, including GETs. Do not open the same database through
 multiple `MiniKV` instances or processes concurrently; coordination is only
 within one instance. The caller must also ensure the instance is not moved or
 destroyed while another thread is using it.
@@ -77,8 +86,10 @@ See [the version 2 file format](docs/file-format.md) for the byte layout, CRC-32
 and validation rules. `DurabilityMode::Buffered` (the default) flushes C++ stream
 buffers into the operating system's caching path. `DurabilityMode::Sync` also
 calls `FlushFileBuffers` on Windows or `fsync` on POSIX before changing the
-in-memory index. Sync mode is stronger and slower, but it is not an ACID claim or
-an absolute guarantee against hardware that does not honor flush requests.
+in-memory index. Compaction also uses same-filesystem atomic rename primitives
+for its generation and manifest switch. Sync mode is stronger and slower, but it
+is not an ACID claim or an absolute guarantee against hardware that does not
+honor flush requests.
 
 ## Build and run
 

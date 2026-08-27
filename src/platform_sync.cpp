@@ -77,6 +77,20 @@ void replace_file_atomically(const std::filesystem::path& source,
     }
 }
 
+void install_directory_atomically(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination,
+                                  bool durable) {
+    const auto flags = durable ? MOVEFILE_WRITE_THROUGH : 0U;
+    if (MoveFileExW(source.wstring().c_str(),
+                    destination.wstring().c_str(),
+                    flags) == 0) {
+        throw std::system_error(
+            static_cast<int>(GetLastError()),
+            std::system_category(),
+            "could not atomically install directory");
+    }
+}
+
 }  // namespace minikv::detail
 
 #else
@@ -179,6 +193,18 @@ void replace_file_atomically(const std::filesystem::path& source,
                 destination,
                 durable,
                 "could not atomically replace file");
+}
+
+void install_directory_atomically(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination,
+                                  bool durable) {
+    if (durable) {
+        sync_directory_to_storage(source);
+    }
+    rename_path(source,
+                destination,
+                durable,
+                "could not atomically install directory");
 }
 
 }  // namespace minikv::detail

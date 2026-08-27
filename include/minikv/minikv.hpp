@@ -60,6 +60,10 @@ public:
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] bool empty() const;
 
+    // Rewrites only current live values into a new generation, atomically
+    // switches the database manifest, and then removes obsolete segments.
+    void compact();
+
 private:
     struct IndexEntry {
         std::uint64_t segment_id;

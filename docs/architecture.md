@@ -34,6 +34,13 @@ Client GET
   -> Record decoder and key validation
   -> copied value
 
+Client COMPACT
+  -> acquire the instance mutex
+  -> read the newest indexed PUT for every live key
+  -> write and validate a temporary generation
+  -> atomically install the generation and replace CURRENT
+  -> switch index locations, then remove the obsolete generation
+
 Startup
   -> read CURRENT to select a generation
   -> scan numbered segments and records in order
@@ -68,6 +75,7 @@ segment is established corruption, as are checksum and format failures.
 | GET | `get(key)` | Uses the index to read the newest record and returns a copied value, or `std::nullopt` when missing. |
 | DELETE | `erase(key)` | For an existing key, appends a tombstone and then removes the index entry. A missing key returns `false` without writing. |
 | CONTAINS | `contains(key)` | Reports whether a key currently exists. |
+| COMPACT | `compact()` | Rewrites only live PUTs into a safely installed replacement generation. |
 
 Empty keys and values are valid. A present empty value is distinguishable from a
 missing key because only the latter returns `std::nullopt`. Keys and values may
@@ -114,6 +122,9 @@ its record append succeeds. GET holds the same lock across index lookup, file
 seek, record read, checksum validation, and value copy, so another operation
 cannot change the stream position or indexed state partway through the read.
 Recovery runs during construction before the instance can be shared.
+Compaction holds the same mutex for its entire scan, rewrite, manifest switch,
+index replacement, and cleanup, so concurrent operations cannot invalidate its
+live-record snapshot.
 
 This is deliberately coarse per-instance lock granularity. A mutex provides
 exclusive ownership, so even unrelated keys and concurrent GETs are serialized.
@@ -150,11 +161,52 @@ If a record would exceed the target in a nonempty segment, MiniKV creates the
 next numbered active segment and never appends to the previous one again. One
 record may exceed the target when it occupies a segment alone.
 
-Segmentation makes files manageable but does not reclaim space. Old versions and
-tombstones remain in immutable segments after the index stops referencing them.
-Compaction is still required to rewrite only live state into a replacement
-generation. Every version 2 record carries a CRC-32 that detects many accidental
-byte changes, but it neither repairs data nor authenticates it.
+Segmentation makes files manageable, while compaction reclaims stale record
+bytes. MiniKV reads each indexed live PUT, sorts by binary key for deterministic
+output, and writes only those records to a new generation. Deleted keys are
+absent from the index, so their old PUTs and tombstones are both omitted. Every
+version 2 record carries a CRC-32 that detects many accidental byte changes, but
+it neither repairs data nor authenticates it.
+
+## Compaction safety
+
+Compaction treats `CURRENT` as the commit point for a whole generation:
+
+```text
+write generation-N.tmp
+  -> close/sync segment files
+  -> atomically rename to generation-N
+  -> reopen and checksum-validate every compacted record
+  -> write/sync CURRENT.tmp
+  -> atomically replace CURRENT
+  -> switch in-memory segments and index locations
+  -> close and remove the old generation
+```
+
+Old segments are never deleted while temporary output is incomplete or before
+`CURRENT` selects the new complete generation. A crash before the manifest
+replacement leaves the old generation authoritative. A crash after replacement
+leaves the new generation authoritative and the old directory as harmless extra
+space. Startup first validates the selected generation and then removes
+recognized temporary and unselected generation directories.
+
+The directory rename and manifest replacement stay on the same filesystem.
+POSIX uses `rename` plus directory `fsync` in Sync mode. Windows uses
+`MoveFileExW`, adding `MOVEFILE_WRITE_THROUGH` in Sync mode. These are the
+strongest practical boundaries used here, not a claim that arbitrary filesystems
+or hardware make multi-file updates intrinsically atomic.
+
+If deletion of the old generation fails after the committed switch, MiniKV keeps
+the new view and treats cleanup as best effort. Turning that into an operation
+failure would leave the caller with an error while its old index locations no
+longer describe the selected generation. Restart retries obsolete cleanup.
+
+If atomic manifest replacement reports a failure, its outcome can be ambiguous:
+the new `CURRENT` bytes may already be visible even if a following durable
+directory sync failed. MiniKV propagates that error, leaves its old index intact,
+and rejects further appends or compaction on that instance. Reads of the old live
+snapshot remain available. Restart is the boundary that reads `CURRENT`,
+validates the selected generation, and permits writes again.
 
 ## Crash recovery policy
 
@@ -198,8 +250,8 @@ atomic multi-key changes, authentication, or a general ACID guarantee.
 - `include/minikv`: public library interface
 - `src/record.*`: private binary record model and codec
 - `src/storage_log.*`: private I/O for one segment file
-- `src/segmented_storage.*`: manifest, segment ordering, and rollover
-- `src/platform_sync.*`: one Windows/POSIX durable-flush boundary
+- `src/segmented_storage.*`: manifest, segment ordering, rollover, and compaction
+- `src/platform_sync.*`: Windows/POSIX durable-flush and atomic-rename boundary
 - `src/minikv.cpp`: logical operation ordering and in-memory state
 - `tools`: small programs that use the public interface
 - `tests`: deterministic local checks

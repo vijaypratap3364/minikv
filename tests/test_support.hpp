@@ -165,6 +165,21 @@ inline void write_file(const std::filesystem::path& path,
     return paths;
 }
 
+[[nodiscard]] inline std::vector<std::filesystem::path> generation_paths(
+    const std::filesystem::path& database_path) {
+    std::vector<std::filesystem::path> paths;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(database_path)) {
+        const auto name = entry.path().filename().string();
+        if (entry.is_directory() && name.starts_with("generation-") &&
+            !name.ends_with(".tmp")) {
+            paths.push_back(entry.path());
+        }
+    }
+    std::ranges::sort(paths);
+    return paths;
+}
+
 [[nodiscard]] inline std::filesystem::path active_segment_path(
     const std::filesystem::path& database_path) {
     const auto paths = segment_paths(database_path);

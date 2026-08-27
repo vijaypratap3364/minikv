@@ -107,7 +107,8 @@ example.minikv/
 ```
 
 `CURRENT` is a small text manifest with its own layout version and the selected
-generation identifier. Segment and generation identifiers are unsigned 64-bit
+generation identifier. Its current form is `MINIKV-MANIFEST 1 <generation>`,
+followed by a newline. Segment and generation identifiers are unsigned 64-bit
 values rendered as 20 decimal digits so lexical order matches numeric order.
 Segment identifiers start at one and must be contiguous. The highest numbered
 segment is active; all earlier files are immutable.
@@ -116,6 +117,14 @@ The maximum segment size is a rollover target, not a record-format limit. A new
 record goes to a fresh segment when it would make a nonempty active segment
 exceed the configured target. One valid record may itself be larger than that
 target and occupies a segment by itself.
+
+Compaction writes `generation-<id>.tmp`, closes and optionally syncs its segment
+files, then atomically renames it to the final generation name. After read-back
+validation, MiniKV writes `CURRENT.tmp` and atomically replaces `CURRENT`. Only
+the selected generation participates in recovery. Recognized temporary and
+unselected generation directories are safe to remove after the selected
+generation has opened and validated. The manifest layout version is independent
+of binary record format version 2.
 
 ## Offsets, flushing, and current limits
 
@@ -129,8 +138,10 @@ after each record. In buffered durability mode, that is the write-completion
 boundary before MiniKV changes its index. In sync mode, MiniKV additionally calls
 `FlushFileBuffers` on Windows or `fsync` on POSIX before changing the index.
 
-Startup validates records from offset zero. If the file ends before the next
-record's header, payload, or checksum is complete, MiniKV truncates the file to
-the last complete checksum-valid record and recovers all earlier state. Invalid
-format or checksum mismatch in a complete record aborts opening and leaves the
-file unchanged. No recovery path searches for a guessed later boundary.
+Startup validates each selected-generation segment from offset zero. If the
+active segment ends before the next record's header, payload, or checksum is
+complete, MiniKV truncates that segment to its last complete checksum-valid
+record and recovers all earlier state. The same incomplete input in an immutable
+segment is corruption and remains untouched. Invalid format or checksum mismatch
+in a complete record also aborts opening. No recovery path searches for a guessed
+later boundary.

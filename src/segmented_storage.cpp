@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -55,6 +56,35 @@ constexpr std::size_t formatted_id_width = 20;
                            std::string(file_name));
     }
     return id;
+}
+
+struct ParsedGenerationName {
+    GenerationId id;
+    bool temporary;
+};
+
+[[nodiscard]] std::optional<ParsedGenerationName> parse_generation_name(
+    std::string_view directory_name) {
+    bool temporary = false;
+    if (directory_name.ends_with(".tmp")) {
+        temporary = true;
+        directory_name.remove_suffix(4);
+    }
+    if (directory_name.size() !=
+            generation_prefix.size() + formatted_id_width ||
+        !directory_name.starts_with(generation_prefix)) {
+        return std::nullopt;
+    }
+
+    const auto digits = directory_name.substr(generation_prefix.size());
+    GenerationId id = 0;
+    const auto [end, error] =
+        std::from_chars(digits.data(), digits.data() + digits.size(), id);
+    if (error != std::errc{} || end != digits.data() + digits.size() ||
+        id == 0) {
+        return std::nullopt;
+    }
+    return ParsedGenerationName{id, temporary};
 }
 
 [[nodiscard]] bool is_sync_mode(DurabilityMode mode) noexcept {
@@ -124,10 +154,15 @@ SegmentedStorage::SegmentedStorage(std::filesystem::path database_path,
     } else {
         load_manifest();
         load_segments();
+        cleanup_obsolete_generations();
     }
 }
 
 SegmentLocation SegmentedStorage::append(const Record& record) {
+    if (compaction_failed_) {
+        throw StorageError(
+            "segmented storage cannot append after a compaction failure");
+    }
     const auto encoded = encode_record(record);
     const auto encoded_size = static_cast<std::uint64_t>(encoded.size());
     const auto current_size = active_segment().log->size();
@@ -161,6 +196,136 @@ Record SegmentedStorage::read(const SegmentLocation& location) const {
             "indexed record size does not match its storage segment");
     }
     return std::move(located.record);
+}
+
+CompactionResult SegmentedStorage::compact(
+    const std::vector<Record>& live_records,
+    const CompactionFaultInjector& fault_injector) {
+    if (compaction_failed_) {
+        throw StorageError(
+            "segmented storage cannot compact after a compaction failure");
+    }
+    if (generation_id_ == std::numeric_limits<GenerationId>::max()) {
+        throw StorageError("generation identifier would overflow");
+    }
+
+    cleanup_obsolete_generations();
+    const auto next_generation_id = generation_id_ + 1;
+    const auto final_path = generation_path(next_generation_id);
+    auto temporary_path = final_path;
+    temporary_path += ".tmp";
+
+    std::error_code error;
+    if (!std::filesystem::create_directory(temporary_path, error)) {
+        throw StorageError("could not create temporary compacted generation: " +
+                           error.message());
+    }
+
+    std::vector<SegmentLocation> locations;
+    locations.reserve(live_records.size());
+    SegmentId output_segment_id = 1;
+    auto output_path =
+        temporary_path / segment_file_name(output_segment_id);
+    auto output_log = std::make_unique<StorageLog>(
+        output_path, durability_mode_, StorageLogMode::Append);
+
+    const auto close_output = [&] {
+        output_log->seal();
+        output_log.reset();
+        if (is_sync_mode(durability_mode_)) {
+            try {
+                sync_file_to_storage(output_path);
+            } catch (const std::system_error& sync_error) {
+                throw StorageError("could not sync compacted segment: " +
+                                   std::string(sync_error.what()));
+            }
+        }
+    };
+
+    for (const auto& record : live_records) {
+        if (record.operation != Operation::Put) {
+            throw StorageError("compaction input must contain only live PUTs");
+        }
+        const auto encoded = encode_record(record);
+        const auto encoded_size =
+            static_cast<std::uint64_t>(encoded.size());
+        const auto current_size = output_log->size();
+        if (current_size != 0 &&
+            (encoded_size > maximum_segment_size_ ||
+             current_size > maximum_segment_size_ - encoded_size)) {
+            close_output();
+            if (output_segment_id ==
+                std::numeric_limits<SegmentId>::max()) {
+                throw StorageError(
+                    "compacted segment identifier would overflow");
+            }
+            ++output_segment_id;
+            output_path =
+                temporary_path / segment_file_name(output_segment_id);
+            output_log = std::make_unique<StorageLog>(
+                output_path, durability_mode_, StorageLogMode::Append);
+        }
+
+        const auto appended = output_log->append_encoded(encoded);
+        locations.push_back(SegmentLocation{
+            output_segment_id, appended.offset, appended.size});
+    }
+    close_output();
+
+    if (fault_injector) {
+        fault_injector(CompactionPhase::TemporaryGenerationComplete);
+    }
+
+    try {
+        install_directory_atomically(
+            temporary_path, final_path, is_sync_mode(durability_mode_));
+    } catch (const std::system_error& install_error) {
+        throw StorageError("could not install compacted generation: " +
+                           std::string(install_error.what()));
+    }
+
+    if (fault_injector) {
+        fault_injector(CompactionPhase::GenerationInstalled);
+    }
+
+    auto replacement_segments = open_segments(final_path);
+    for (std::size_t index = 0; index < live_records.size(); ++index) {
+        const auto& location = locations[index];
+        const auto segment = std::ranges::lower_bound(
+            replacement_segments, location.segment_id, {}, &Segment::id);
+        if (segment == replacement_segments.end() ||
+            segment->id != location.segment_id ||
+            segment->log->read(AppendResult{
+                location.offset, location.record_size}) != live_records[index]) {
+            throw StorageError(
+                "compacted generation failed read-back validation");
+        }
+    }
+    try {
+        write_manifest(next_generation_id);
+    } catch (...) {
+        // A manifest replace followed by a failed durable directory sync has an
+        // ambiguous outcome. Keep old reads available, but reject later writes
+        // until restart selects and validates the authoritative generation.
+        compaction_failed_ = true;
+        throw;
+    }
+
+    if (fault_injector) {
+        fault_injector(CompactionPhase::ManifestCommitted);
+    }
+
+    const auto old_generation_path = generation_path();
+    segments_.swap(replacement_segments);
+    generation_id_ = next_generation_id;
+    replacement_segments.clear();
+
+    std::filesystem::remove_all(old_generation_path, error);
+    // The manifest and in-memory view already select the new generation. A
+    // cleanup failure must not turn that committed compaction into an apparent
+    // failure with stale index locations; restart retries obsolete cleanup.
+
+    return CompactionResult{std::move(locations)};
 }
 
 std::vector<SegmentId> SegmentedStorage::segment_ids() const {
@@ -255,7 +420,11 @@ void SegmentedStorage::write_manifest(GenerationId generation_id) {
 }
 
 void SegmentedStorage::load_segments() {
-    const auto path = generation_path();
+    segments_ = open_segments(generation_path());
+}
+
+std::vector<SegmentedStorage::Segment> SegmentedStorage::open_segments(
+    const std::filesystem::path& path) const {
     std::error_code error;
     if (!std::filesystem::is_directory(path, error)) {
         if (error) {
@@ -281,7 +450,8 @@ void SegmentedStorage::load_segments() {
     }
 
     SegmentId expected_id = 1;
-    segments_.reserve(files.size());
+    std::vector<Segment> opened_segments;
+    opened_segments.reserve(files.size());
     for (std::size_t index = 0; index < files.size(); ++index) {
         const auto& [id, segment_file_path] = files[index];
         if (id != expected_id) {
@@ -291,12 +461,43 @@ void SegmentedStorage::load_segments() {
         const auto mode = index + 1 == files.size()
                               ? StorageLogMode::Append
                               : StorageLogMode::ReadOnly;
-        segments_.push_back(Segment{
+        opened_segments.push_back(Segment{
             id,
             segment_file_path,
             std::make_unique<StorageLog>(
                 segment_file_path, durability_mode_, mode)});
         ++expected_id;
+    }
+    return opened_segments;
+}
+
+void SegmentedStorage::cleanup_obsolete_generations() {
+    std::vector<std::filesystem::path> obsolete_paths;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(database_path_)) {
+        const auto name = entry.path().filename().string();
+        if (entry.is_regular_file() &&
+            name == manifest_temporary_file_name) {
+            obsolete_paths.push_back(entry.path());
+            continue;
+        }
+        if (!entry.is_directory()) {
+            continue;
+        }
+        const auto parsed = parse_generation_name(name);
+        if (parsed &&
+            (parsed->temporary || parsed->id != generation_id_)) {
+            obsolete_paths.push_back(entry.path());
+        }
+    }
+
+    for (const auto& path : obsolete_paths) {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+        if (error) {
+            throw StorageError("could not clean obsolete generation: " +
+                               error.message());
+        }
     }
 }
 
@@ -332,7 +533,12 @@ SegmentedStorage::Segment& SegmentedStorage::active_segment() {
 }
 
 std::filesystem::path SegmentedStorage::generation_path() const {
-    return database_path_ / generation_directory_name(generation_id_);
+    return generation_path(generation_id_);
+}
+
+std::filesystem::path SegmentedStorage::generation_path(
+    GenerationId id) const {
+    return database_path_ / generation_directory_name(id);
 }
 
 std::filesystem::path SegmentedStorage::segment_path(SegmentId id) const {

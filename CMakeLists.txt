@@ -79,6 +79,11 @@ if(BUILD_TESTING)
 
     minikv_add_test(minikv_tests tests/minikv_test.cpp minikv.api)
     minikv_add_test(
+        compaction_tests
+        tests/compaction_test.cpp
+        minikv.compaction
+    )
+    minikv_add_test(
         concurrency_tests
         tests/concurrency_test.cpp
         minikv.concurrency

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -29,6 +30,19 @@ struct SegmentedLocatedRecord {
     SegmentLocation location;
 };
 
+enum class CompactionPhase {
+    TemporaryGenerationComplete,
+    GenerationInstalled,
+    ManifestCommitted,
+};
+
+using CompactionFaultInjector =
+    std::function<void(CompactionPhase phase)>;
+
+struct CompactionResult {
+    std::vector<SegmentLocation> locations;
+};
+
 [[nodiscard]] std::string generation_directory_name(GenerationId id);
 [[nodiscard]] std::string segment_file_name(SegmentId id);
 
@@ -48,6 +62,9 @@ public:
         SegmentId segment_id,
         std::uint64_t offset) const;
     [[nodiscard]] Record read(const SegmentLocation& location) const;
+    [[nodiscard]] CompactionResult compact(
+        const std::vector<Record>& live_records,
+        const CompactionFaultInjector& fault_injector = {});
 
     [[nodiscard]] std::vector<SegmentId> segment_ids() const;
     [[nodiscard]] SegmentId active_segment_id() const;
@@ -65,11 +82,16 @@ private:
     void load_manifest();
     void write_manifest(GenerationId generation_id);
     void load_segments();
+    [[nodiscard]] std::vector<Segment> open_segments(
+        const std::filesystem::path& generation_path) const;
+    void cleanup_obsolete_generations();
     void roll_over();
 
     [[nodiscard]] const Segment& find_segment(SegmentId id) const;
     [[nodiscard]] Segment& active_segment();
     [[nodiscard]] std::filesystem::path generation_path() const;
+    [[nodiscard]] std::filesystem::path generation_path(
+        GenerationId id) const;
     [[nodiscard]] std::filesystem::path segment_path(SegmentId id) const;
 
     std::filesystem::path database_path_;
@@ -77,6 +99,7 @@ private:
     std::uint64_t maximum_segment_size_;
     GenerationId generation_id_{0};
     std::vector<Segment> segments_;
+    bool compaction_failed_{false};
 };
 
 }  // namespace minikv::detail

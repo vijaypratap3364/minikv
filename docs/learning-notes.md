@@ -487,3 +487,95 @@ history safely. Writing new files is not enough: a crash must leave either the
 old complete generation or the new complete generation selected, never a mix.
 The next milestone needs temporary output, an atomic manifest switch, delayed
 deletion of old segments, and deterministic interruption tests.
+
+## Compaction: replacing history with current state
+
+### 1. What problem existed?
+
+Append-only systems accumulate stale data because changing a key appends a new
+record instead of overwriting its old bytes. The index needs only the latest
+operation, but every superseded PUT and tombstone remains in immutable segments.
+Rollover limits each file's size; it does not limit the total bytes across files.
+
+This is space amplification: physical storage exceeds the bytes needed for the
+current logical values. An overwrite-heavy database can have a tiny live state
+and a large segment generation.
+
+### 2. What did we build?
+
+`MiniKV::compact()` creates a replacement generation containing one PUT for each
+currently live key. Compaction means reading an accumulated representation and
+rewriting a smaller equivalent representation without stale history. Because
+the replacement generation is a complete snapshot, keys absent from the live
+index stay absent without copying their tombstones.
+
+Compaction is manual and blocking in this stage. It holds MiniKV's instance mutex
+so writes and reads cannot change the snapshot or observe half-switched index
+locations.
+
+### 3. How does it solve the problem?
+
+MiniKV reads each live record through its segment-aware index and writes only
+those checksum-protected PUTs. Overwritten values, deleted values, and obsolete
+tombstones are omitted. The new generation may itself contain several segments
+when its live data exceeds the rollover target.
+
+Tests measure actual `.dat` file sizes. The deterministic overwrite-heavy
+fixture uses 27,852 bytes before compaction and 1,071 bytes afterward. Those
+numbers describe that fixture only; MiniKV makes no universal percentage claim.
+An empty live set compacts to one empty active segment with zero record bytes.
+
+### 4. What happens internally?
+
+MiniKV first prepares a sorted list of live records and a replacement hash index
+without changing persistent state. The storage layer then follows this order:
+
+1. Write live PUTs to `generation-N.tmp`, rolling segments when needed.
+2. Close and, in Sync mode, durably flush each output segment.
+3. Atomically rename the temporary directory to its final generation name.
+4. Reopen and checksum-validate every output record at its planned location.
+5. Write and sync `CURRENT.tmp`, then atomically replace `CURRENT`.
+6. Switch the in-memory segment view and prepared index locations.
+7. Close and remove the old generation.
+
+The one-file manifest is an indirection point: filesystems do not offer one
+portable atomic operation that replaces an arbitrary set of segment files.
+Before the manifest switch, restart selects the untouched old generation. After
+it, restart selects the complete new generation. Only then is deleting old files
+safe. Startup removes recognized temporary or unselected generations left by an
+interruption. Deterministic fault injection tests stop after temporary output,
+after generation installation, and after manifest commit.
+
+### 5. What can still go wrong?
+
+Compaction costs CPU to hash, sort, encode, decode, and verify checksums. It costs
+disk I/O to read live records and write them again. That extra physical writing
+beyond the application's logical PUTs is write amplification. During compaction,
+both old and new generations coexist, temporarily increasing peak space
+amplification.
+
+Read amplification describes extra physical reads needed for a logical result.
+A normal indexed GET still reads one record, but recovery scans every record and
+compaction reads every live record; many small segments also add file-management
+work. MiniKV does not compact in the background, rate-limit I/O, or reserve disk
+space in advance. Running out of space leaves the old manifest authoritative if
+the switch has not committed. Failure to delete an already obsolete generation
+can temporarily leak space, but restart retries cleanup.
+
+A manifest replacement can also report an ambiguous durable-sync failure after
+the rename became visible. That instance preserves its old index for reads but
+rejects later writes and compaction; restart reads the authoritative manifest and
+rebuilds a consistent index before accepting mutations again.
+
+Safe replacement is difficult because crashes may occur between any two file
+operations, atomic rename guarantees vary by filesystem, and a successful sync
+request still depends on the OS and storage device honoring its contract. MiniKV
+does not claim transactions, replication, authentication, or general ACID.
+
+### 6. What new problem does this design introduce?
+
+Compaction reduces space but competes with application work and currently blocks
+the whole instance. Choosing segment sizes and deciding when to compact are now
+performance questions rather than correctness questions. Stage 8 needs measured
+benchmarks and profiling before changing lock granularity, compaction policy, or
+I/O strategy, plus automation that keeps those measurements reproducible.
