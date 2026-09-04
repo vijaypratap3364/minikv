@@ -70,7 +70,7 @@ try {
         $benchmarkOutput,
         ""
     )
-    $profile = & $Gprof -l -b $benchmark "gmon.out"
+    $profile = & $Gprof -p -l -b $benchmark "gmon.out"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     @($header + $profile) | Set-Content -LiteralPath $outputPath
 }

@@ -255,5 +255,29 @@ atomic multi-key changes, authentication, or a general ACID guarantee.
 - `src/minikv.cpp`: logical operation ordering and in-memory state
 - `tools`: small programs that use the public interface
 - `tests`: deterministic local checks
-- `benchmarks`: deferred performance workloads
+- `benchmarks`: reproducible performance workloads, profiling scripts, and raw results
 - `docs`: design decisions and the learning narrative
+
+## Measured performance boundary
+
+The benchmark runner is a client of the public `MiniKV` API. It does not reach
+into storage internals, disable integrity checks, or substitute a memory-only
+path. Each invocation creates a fresh database, prepares deterministic keys and
+operation choices outside the timed interval, measures logical operations with
+`std::chrono::steady_clock`, and removes the database afterward unless asked to
+keep it. Results include the compiler, build type, commit, OS, logical CPU count,
+seed, workload settings, throughput, nearest-rank latency percentiles, and data
+file sizes.
+
+Stage 8 profiling found the original bit-at-a-time CRC-32 loop to be the CPU
+bottleneck for 4 KiB sequential PUTs. The replacement uses a compile-time-built
+256-entry lookup table with the same reflected polynomial, initial value, and
+final XOR. It changes only how the checksum is calculated; the version 2 record
+format and checksum bytes are unchanged. The standard check-vector and exact
+record-layout tests guard that compatibility.
+
+The current coarse instance mutex remains an explicit performance boundary.
+Recorded read-only runs with 1, 2, 4, and 8 callers did not show monotonic
+throughput scaling. That matches the architecture: GETs wait on one mutex and
+one mutable file stream. Stage 8 does not replace that design without a measured
+and correctness-preserving positional-read mechanism.

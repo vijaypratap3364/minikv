@@ -116,6 +116,23 @@ ctest --test-dir build-tsan --output-on-failure
 The sanitizer option intentionally rejects Windows and unsupported compilers.
 It is off by default, so normal local builds do not pay the instrumentation cost.
 
+Build and run the dependency-free performance workloads in Release mode:
+
+```powershell
+cmake -S . -B build-bench `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DMINIKV_BUILD_BENCHMARKS=ON
+cmake --build build-bench --parallel 2
+./benchmarks/run_suite.ps1 -BuildDirectory build-bench
+```
+
+The runner measures sequential PUT, random GET, update-heavy, mixed,
+delete-heavy, recovery, compaction, and configurable concurrent workloads. See
+[the benchmark guide](benchmarks/README.md) for methodology, result fields, and
+GNU `gprof` instructions. Recorded Stage 8 measurements are kept under
+`benchmarks/results`; they describe their recorded machine and settings, not a
+general performance guarantee.
+
 Run the linked append-only demo from the generator-specific output directory:
 
 ```powershell

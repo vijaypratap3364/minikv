@@ -579,3 +579,89 @@ the whole instance. Choosing segment sizes and deciding when to compact are now
 performance questions rather than correctness questions. Stage 8 needs measured
 benchmarks and profiling before changing lock granularity, compaction policy, or
 I/O strategy, plus automation that keeps those measurements reproducible.
+
+## Measuring first: benchmarks, profiling, and one optimization
+
+### 1. What problem existed?
+
+MiniKV could explain the expected complexity of its index and the cost of sync,
+but it had no repeatable evidence for real performance. Big-O notation does not
+include filesystem stalls, checksum cost, allocation, locking, or a particular
+machine. Optimizing whichever part merely looked slow risked adding complexity
+without helping the workload.
+
+Throughput and latency answer different questions. Throughput is completed
+operations per second across an interval. Latency is how long one operation
+takes. p50 is the median: half the observations are no slower. p95 and p99 show
+the thresholds containing 95% and 99% of observations, exposing tail behavior
+that an average can hide.
+
+### 2. What did we build?
+
+The dependency-free benchmark runner covers sequential PUT, random GET,
+update-heavy, mixed GET/PUT, delete-heavy, restart recovery, compaction, and
+concurrent access. Key count, value size, operation count, seed, uniform or hot
+key distribution, segment target, durability, and reader/writer counts are
+configurable. The standard script includes read-only 1, 2, 4, and 8-thread runs.
+
+CSV rows record UTC time, OS, compiler, build type, commit SHA, logical CPU
+count, all workload settings, operations/second, nearest-rank p50/p95/p99,
+segment bytes, and recovery or compaction duration. Portable memory usage is not
+reported because standard C++ has no reliable cross-platform resident-memory
+counter; presenting incomparable platform metrics would be misleading.
+
+### 3. How does it solve the problem?
+
+Each invocation uses a fresh temporary database and deterministic operation
+sequence. Setup and prefilling occur before the timed interval. Release builds
+provide wall-clock measurements, while an optional GNU gprof build answers a
+different question: where CPU samples land. A bottleneck is the resource or code
+path that limits the measured workload, not simply a function that looks busy in
+source code.
+
+On the recorded Windows/GCC machine, a 4 KiB sequential-PUT profile placed all
+10 before-change CPU samples inside the bit-at-a-time CRC-32 loop. That evidence
+justified replacing eight branch-heavy bit steps per byte with the standard
+table-driven recurrence. The 256-entry table is built at compile time from the
+same polynomial.
+
+### 4. What happens internally?
+
+The accepted comparison used 4,000 sequential PUTs, 4,096-byte values, the same
+seed and 64 MiB segment target, and Buffered durability. Production Release
+throughput changed from 17,992.4 to 31,519.7 operations/second. Elapsed time fell
+from 222.316 to 126.905 milliseconds; p50/p95/p99 changed from
+46.8/88.6/109.1 to 23.0/64.2/79.6 microseconds. Both runs wrote exactly
+16,528,000 segment bytes.
+
+The checksum algorithm and version 2 format did not change. The known CRC-32
+check vector remains `0xCBF43926`, and the exact-record-layout test verifies the
+same checksum bytes. Only the implementation used to compute them changed.
+
+### 5. What can still go wrong?
+
+Microbenchmarks are sensitive to background services, filesystem caches,
+antivirus scanning, CPU power state, and temperature. The raw suite preserves a
+run where a few stalls increased total time even though typical latency stayed
+low. One pass is useful evidence, not a universal claim; serious regression
+gates need repetitions, machine control, and a declared acceptance rule.
+
+Per-operation timing also has overhead, gprof instrumentation changes execution
+speed, and its 10 ms samples are coarse once the hot loop becomes fast. Buffered
+results do not predict Sync durability latency. The recorded numbers describe
+Windows 10.0.22631, an AMD Ryzen 5 8640HS, 12 logical CPUs, and MSYS2 GCC 15.2.0.
+
+Optimization without measurement is dangerous because it can target code that
+does not constrain the workload, trade correctness for speed, or make another
+path slower. The full suite remains in the repository so regressions and
+non-improvements are visible rather than selected away.
+
+### 6. What new problem does this design introduce?
+
+Benchmarks need maintenance as workloads and formats evolve. The thread sweep
+also confirms that MiniKV's coarse mutex does not gain throughput from more
+readers: the recorded 1/2/4/8-thread run produced 147,418, 112,638, 107,940, and
+112,082 operations/second before the checksum change. Improving that boundary
+would require a safe positional-read design and a separate measured change, not
+an automatic switch to shared locking. Stage 8 stops after the one supported
+CRC optimization.
