@@ -40,6 +40,11 @@ if(MINIKV_ENABLE_GPROF)
     endif()
     add_compile_options(-pg)
     add_link_options(-pg)
+    if(MINGW)
+        # MinGW gprof records relocated addresses when ASLR is enabled, which
+        # prevents its report from matching samples back to executable symbols.
+        add_link_options(-Wl,--disable-dynamicbase)
+    endif()
 endif()
 
 function(minikv_enable_warnings target_name)

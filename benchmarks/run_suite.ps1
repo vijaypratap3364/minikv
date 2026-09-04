@@ -6,7 +6,10 @@ param(
     [int]$ValueSize = 256,
     [int]$Operations = 4000,
     [int64]$SegmentSize = 262144,
-    [string]$CMake = "cmake"
+    [string]$CMake = "cmake",
+    [string]$Generator = "",
+    [string]$MakeProgram = "",
+    [string]$CxxCompiler = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,8 +17,20 @@ $repository = Split-Path -Parent $PSScriptRoot
 $buildPath = Join-Path $repository $BuildDirectory
 $outputPath = Join-Path $repository $Output
 
-& $CMake -S $repository -B $buildPath -DCMAKE_BUILD_TYPE=Release `
-    -DMINIKV_BUILD_BENCHMARKS=ON
+$configureArguments = @(
+    "-S", $repository,
+    "-B", $buildPath,
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DMINIKV_BUILD_BENCHMARKS=ON"
+)
+if ($Generator) { $configureArguments += @("-G", $Generator) }
+if ($MakeProgram) {
+    $configureArguments += "-DCMAKE_MAKE_PROGRAM=$MakeProgram"
+}
+if ($CxxCompiler) {
+    $configureArguments += "-DCMAKE_CXX_COMPILER=$CxxCompiler"
+}
+& $CMake @configureArguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $CMake --build $buildPath --parallel 2 --target minikv_benchmark
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

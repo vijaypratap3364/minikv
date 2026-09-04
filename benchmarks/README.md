@@ -58,3 +58,6 @@ and command are written above the `gprof` report so a later build can repeat the
 same experiment. Wall-clock benchmark results remain the source for user-visible
 latency and throughput; instrumentation profiles identify where CPU time is
 spent.
+
+Both scripts accept optional `-Generator`, `-MakeProgram`, and `-CxxCompiler`
+arguments when CMake cannot discover the desired toolchain automatically.
