@@ -14,6 +14,7 @@ constexpr std::size_t operation_offset = 5;
 constexpr std::size_t reserved_offset = 6;
 constexpr std::size_t key_length_offset = 8;
 constexpr std::size_t value_length_offset = 12;
+constexpr std::uint32_t crc32_reversed_polynomial = 0xEDB88320U;
 
 [[nodiscard]] char byte_as_char(std::uint8_t value) noexcept {
     return std::bit_cast<char>(value);
@@ -22,6 +23,22 @@ constexpr std::size_t value_length_offset = 12;
 [[nodiscard]] std::uint8_t char_as_byte(char value) noexcept {
     return std::bit_cast<std::uint8_t>(value);
 }
+
+[[nodiscard]] consteval std::array<std::uint32_t, 256> make_crc32_table() {
+    std::array<std::uint32_t, 256> table{};
+    for (std::uint32_t index = 0; index < table.size(); ++index) {
+        auto remainder = index;
+        for (unsigned int bit = 0; bit < 8; ++bit) {
+            remainder = (remainder & 1U) != 0
+                            ? (remainder >> 1U) ^ crc32_reversed_polynomial
+                            : remainder >> 1U;
+        }
+        table[index] = remainder;
+    }
+    return table;
+}
+
+constexpr auto crc32_table = make_crc32_table();
 
 void append_u32_little_endian(EncodedRecord& output, std::uint32_t value) {
     for (unsigned int shift = 0; shift < 32; shift += 8) {
@@ -77,17 +94,11 @@ void validate_record(const Record& record) {
 }  // namespace
 
 std::uint32_t crc32(std::span<const char> input) noexcept {
-    constexpr std::uint32_t reversed_polynomial = 0xEDB88320U;
     std::uint32_t checksum = 0xFFFFFFFFU;
     for (const char encoded_byte : input) {
-        checksum ^= char_as_byte(encoded_byte);
-        for (unsigned int bit = 0; bit < 8; ++bit) {
-            if ((checksum & 1U) != 0) {
-                checksum = (checksum >> 1U) ^ reversed_polynomial;
-            } else {
-                checksum >>= 1U;
-            }
-        }
+        const auto table_index = static_cast<std::uint8_t>(
+            checksum ^ char_as_byte(encoded_byte));
+        checksum = crc32_table[table_index] ^ (checksum >> 8U);
     }
     return checksum ^ 0xFFFFFFFFU;
 }
