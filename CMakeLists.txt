@@ -14,6 +14,16 @@ option(
     "Instrument MiniKV and its tests with ThreadSanitizer"
     OFF
 )
+option(
+    MINIKV_BUILD_BENCHMARKS
+    "Build the dependency-free MiniKV benchmark runner"
+    OFF
+)
+option(
+    MINIKV_ENABLE_GPROF
+    "Instrument MiniKV and benchmark targets for GNU gprof"
+    OFF
+)
 if(MINIKV_ENABLE_TSAN)
     if(WIN32 OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         message(
@@ -23,6 +33,13 @@ if(MINIKV_ENABLE_TSAN)
     endif()
     add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
     add_link_options(-fsanitize=thread)
+endif()
+if(MINIKV_ENABLE_GPROF)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(FATAL_ERROR "MINIKV_ENABLE_GPROF requires GCC")
+    endif()
+    add_compile_options(-pg)
+    add_link_options(-pg)
 endif()
 
 function(minikv_enable_warnings target_name)
@@ -59,6 +76,34 @@ add_executable(minikv_demo tools/minikv_demo.cpp)
 target_link_libraries(minikv_demo PRIVATE MiniKV::minikv)
 set_target_properties(minikv_demo PROPERTIES CXX_EXTENSIONS OFF)
 minikv_enable_warnings(minikv_demo)
+
+if(MINIKV_BUILD_BENCHMARKS)
+    execute_process(
+        COMMAND git rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE MINIKV_BENCHMARK_GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT MINIKV_BENCHMARK_GIT_SHA)
+        set(MINIKV_BENCHMARK_GIT_SHA "unknown")
+    endif()
+
+    add_executable(minikv_benchmark benchmarks/minikv_benchmark.cpp)
+    target_link_libraries(minikv_benchmark PRIVATE MiniKV::minikv)
+    target_compile_definitions(
+        minikv_benchmark
+        PRIVATE
+            MINIKV_BENCHMARK_BUILD_TYPE="$<CONFIG>"
+            MINIKV_BENCHMARK_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+            MINIKV_BENCHMARK_GIT_SHA="${MINIKV_BENCHMARK_GIT_SHA}"
+            MINIKV_BENCHMARK_OS="${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_VERSION}"
+    )
+    set_target_properties(
+        minikv_benchmark PROPERTIES CXX_EXTENSIONS OFF
+    )
+    minikv_enable_warnings(minikv_benchmark)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

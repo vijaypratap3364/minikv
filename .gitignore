@@ -3,6 +3,9 @@
 /out/
 /Testing/
 /.cache/
+/build-bench/
+/build-profile/
+/benchmarks/results/local.csv
 *.suo
 *.user
 *.VC.db
